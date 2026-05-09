@@ -46,13 +46,22 @@ Once Codeward lands on PyPI, this will become `pip install codeward` / `pipx ins
 Inside any repository:
 
 ```bash
-codeward init      # writes CLAUDE.md + AGENTS.md vocabulary, no hooks
-codeward index     # builds .codeward/index.sqlite
-codeward map       # repo overview
+codeward init      # writes CLAUDE.md + AGENTS.md vocabulary (optional, no hooks)
+codeward map       # repo overview — auto-builds the index on first run
 codeward doctor    # verify environment
 ```
 
-That's it — your agent will read CLAUDE.md/AGENTS.md and start using `codeward` commands when they fit.
+That's it. Your agent will read CLAUDE.md/AGENTS.md and start using `codeward` commands when they fit.
+
+> **You don't need to run `codeward index` manually.** The first read-only command in a repo (`map`, `read`, `symbol`, etc.) automatically walks the codebase and writes `.codeward/index.sqlite`. Subsequent commands load from that cache, with mtime-based invalidation when source files change.
+
+When you'd run `codeward index` explicitly:
+
+- **Pre-warming a large repo** before an agent session, so the agent's first command is instant rather than waiting on the build (Django ~9s first run; most repos under 1s).
+- **CI setup scripts** that bake the index into a workspace.
+- **Background indexing** — use `codeward watch` instead, which holds the index hot and incrementally updates on file events.
+
+`codeward init` is purely for writing vocabulary docs (and optionally hooks). It does not touch the index.
 
 ## Optional: hook integration
 
