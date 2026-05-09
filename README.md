@@ -189,7 +189,7 @@ One task, three agents. Full numbers (six Claude task variants, Edit/Write hook 
 | Agent | Shell cmds | Headline savings |
 |---|---|---|
 | **Claude** Sonnet 4.6 | 18 → 11 (−39%) | Tool tokens **−49%** (5,524 → 2,837) |
-| **Codex** gpt-5 | 15 → 12 (−20%) | Output tokens **−18%** (3,649 → 2,990) |
+| **Codex** gpt-5.5 | 15 → 12 (−20%) | Output tokens **−18%** (3,649 → 2,990) |
 | **Gemini** 3-flash-preview | 44 → 19 (−57%) | Input tokens **−60%** (954k → 386k) |
 
 Each row uses the most representative axis its CLI/SDK exposes. Cost is omitted — token counts are stable, per-token cost depends on model choice and changes monthly.
