@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codeward"
+version = "0.4.0"
+description = "Semantic codebase intelligence CLI for coding agents — composes with RTK"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+keywords = ["claude", "claude-code", "codex", "cursor", "ai", "agent", "llm", "rtk", "tokens", "codebase"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+  "Topic :: Software Development :: Code Generators",
+  "Topic :: Utilities",
+  "Operating System :: POSIX",
+  "Operating System :: MacOS",
+]
+authors = [{name = "Codeward contributors"}]
+
+[project.urls]
+Homepage      = "https://github.com/osirishorus/codeward"
+Documentation = "https://github.com/osirishorus/codeward#readme"
+Issues        = "https://github.com/osirishorus/codeward/issues"
+Changelog     = "https://github.com/osirishorus/codeward/blob/main/CHANGELOG.md"
+dependencies = [
+  "tree-sitter>=0.23",
+  "tree-sitter-go>=0.23",
+  "tree-sitter-rust>=0.23",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.23",
+  "tree-sitter-java>=0.23",
+  "tree-sitter-ruby>=0.23",
+  "tree-sitter-php>=0.23",
+  "tree-sitter-c-sharp>=0.23",
+  # Watchdog enables `codeward watch`, a foreground re-indexer that
+  # incrementally updates the SQLite cache on file events. Without it, watch
+  # falls back to 2-second mtime polling.
+  "watchdog>=4.0",
+]
+
+[project.optional-dependencies]
+# Backward-compatible alias: these packages are part of the default install in
+# v0.4+, so `codeward[full]` remains valid but adds nothing.
+full = []
+
+[project.scripts]
+codeward = "codeward.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

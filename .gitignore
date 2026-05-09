@@ -1,0 +1,32 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.whl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.tox/
+.venv/
+venv/
+
+# Codeward generated state
+.codeward/
+.claude/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs (kept locally for development; not for the published package)
+test-results.md

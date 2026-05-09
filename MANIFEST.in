@@ -1,0 +1,9 @@
+# Include logo, license, and changelog in the source distribution
+# (wheels embed README.md automatically via pyproject.toml; this file
+# governs what `python -m build` puts into the .tar.gz sdist).
+include README.md
+include CHANGELOG.md
+include LICENSE
+include MANIFEST.in
+recursive-include assets *.png *.svg *.jpg *.webp
+recursive-include docs *.md
