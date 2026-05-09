@@ -1599,6 +1599,13 @@ def cmd_init(args) -> int:
     if not args.hook:
         return 0
 
+    no_bash = getattr(args, "no_hook_bash", False)
+    no_edit = getattr(args, "no_hook_edit", False)
+    if no_bash and no_edit:
+        print("error: --no-hook-bash and --no-hook-edit cannot both be set "
+              "(would install nothing). Drop one or omit --hook.", file=sys.stderr)
+        return 2
+
     hook = root / ".claude" / "hooks" / "codeward-hook.sh"
     hook.parent.mkdir(parents=True, exist_ok=True)
     hook.write_text("#!/usr/bin/env bash\ncodeward hook --agent claude\n")
@@ -1606,33 +1613,41 @@ def cmd_init(args) -> int:
 
     project_settings = root / ".claude" / "settings.local.json"
     project_settings.parent.mkdir(parents=True, exist_ok=True)
-    insert_hook_entry(project_settings, str(hook))
-    print(f"Installed Codeward Claude Code hook: {hook}")
-    print(f"Wired into: {project_settings}")
+
+    # Bash rewrite hook: rewrites cat/grep/etc. to codeward equivalents and
+    # tracks savings. Skipped with --no-hook-bash (e.g., when RTK already
+    # owns the Bash surface and you only want preflight context for edits).
+    if not no_bash:
+        insert_hook_entry(project_settings, str(hook))
+        print(f"Installed Codeward Bash rewrite hook: {hook}")
+        print(f"  Wired into: {project_settings}")
 
     # Edit/Write preflight hook: different tool surface from RTK (RTK only fires
     # on Bash). Injects `codeward preflight` info before any file edit so the
-    # agent sees dependents+tests+side-effects up-front. Off by default unless
-    # the user passes --hook-edit. We default it ON when --hook is set since
-    # there's no clash and it's high value.
-    if not getattr(args, "no_hook_edit", False):
+    # agent sees dependents+tests+side-effects up-front. Skipped with --no-hook-edit.
+    if not no_edit:
         insert_edit_hook_entry(project_settings, str(hook))
-        print(f"Installed Codeward Edit/Write preflight hook (different surface from RTK; no clash).")
+        print(f"Installed Codeward Edit/Write preflight hook  (different matcher from RTK; no clash).")
 
     if args.global_install:
         global_settings = Path.home() / ".claude" / "settings.json"
         global_settings.parent.mkdir(parents=True, exist_ok=True)
-        outcome = insert_hook_entry(global_settings, "codeward hook --agent claude")
-        if outcome == "added":
-            print(f"Added global hook entry to {global_settings} (placed before any rtk entry).")
-        elif outcome == "reordered":
-            print(f"Re-ordered existing Codeward hook in {global_settings} to run before rtk.")
-        else:
-            print(f"Global hook already present in {global_settings} (no change).")
+        if not no_bash:
+            outcome = insert_hook_entry(global_settings, "codeward hook --agent claude")
+            if outcome == "added":
+                print(f"Added global Bash hook entry to {global_settings} (placed before any rtk entry).")
+            elif outcome == "reordered":
+                print(f"Re-ordered existing Codeward Bash hook in {global_settings} to run before rtk.")
+            else:
+                print(f"Global Bash hook already present in {global_settings} (no change).")
+        if not no_edit:
+            insert_edit_hook_entry(global_settings, "codeward hook --agent claude")
+            print(f"Installed global Edit/Write preflight hook into {global_settings}.")
 
-    if rtk_present:
+    if rtk_present and not no_bash:
         print("RTK is active. Codeward will rewrite to `codeward ...` first; RTK passes those through unchanged.")
-    print("Use !raw <command> to bypass rewrites.")
+    if not no_bash:
+        print("Use !raw <command> to bypass Bash rewrites.")
     return 0
 
 
@@ -1697,7 +1712,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Also write semantic vocabulary to each agent's GLOBAL memory file "
                       "(~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.gemini/GEMINI.md). "
                       "When combined with --hook, additionally wires ~/.claude/settings.json.")
-    init.add_argument("--no-hook-edit", action="store_true", help="Skip the Edit/Write preflight hook (default: install when --hook is set)")
+    init.add_argument("--no-hook-bash", action="store_true",
+                      help="Skip the Bash rewrite hook (install only the Edit/Write preflight). "
+                      "Useful when RTK already owns the Bash surface and you just want pre-edit context.")
+    init.add_argument("--no-hook-edit", action="store_true",
+                      help="Skip the Edit/Write preflight hook (install only the Bash rewrite hook).")
     init.set_defaults(func=cmd_init)
     doc = sub.add_parser("doctor", parents=[common])
     doc.set_defaults(func=cmd_doctor)

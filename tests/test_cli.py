@@ -594,15 +594,67 @@ def test_init_hook_global_orders_before_rtk_and_is_idempotent(sample_repo, tmp_p
     data = json.loads(settings.read_text())
     assert data["model"] == "opus"
     pre = data["hooks"]["PreToolUse"]
+    # First entry must be codeward (Bash matcher, ordered before rtk)
     assert "codeward" in pre[0]["hooks"][0]["command"]
+    assert pre[0]["matcher"] == "Bash"
+    # Second is the existing rtk entry (Bash matcher)
     assert "rtk" in pre[1]["hooks"][0]["command"]
+    # Third is the codeward Edit/Write preflight hook (different matcher, no clash)
+    edit_entries = [e for e in pre if e.get("matcher") == "Edit|Write|MultiEdit"]
+    assert len(edit_entries) == 1
+    assert "codeward" in edit_entries[0]["hooks"][0]["command"]
+    # Idempotent: re-running should not duplicate codeward entries
     second = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
     assert second.returncode == 0
     data2 = json.loads(settings.read_text())
     pre2 = data2["hooks"]["PreToolUse"]
-    assert len(pre2) == 2
-    cs_count = sum(1 for e in pre2 for h in e["hooks"] if "codeward" in h["command"])
-    assert cs_count == 1
+    cw_bash = [e for e in pre2 if e.get("matcher") == "Bash" and any("codeward" in h["command"] for h in e["hooks"])]
+    cw_edit = [e for e in pre2 if e.get("matcher") == "Edit|Write|MultiEdit" and any("codeward" in h["command"] for h in e["hooks"])]
+    assert len(cw_bash) == 1, f"expected 1 codeward Bash entry, got {len(cw_bash)}"
+    assert len(cw_edit) == 1, f"expected 1 codeward Edit/Write entry, got {len(cw_edit)}"
+
+
+def test_init_hook_no_bash_installs_only_preflight(sample_repo, tmp_path):
+    """`init --hook --no-hook-bash` should install only the Edit/Write preflight
+    matcher, leaving Bash to RTK. Common setup for users who already run RTK."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    cmd = [sys.executable, "-m", "codeward.cli", "init", "--hook", "--no-hook-bash"]
+    result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    settings = json.loads((sample_repo / ".claude" / "settings.local.json").read_text())
+    pre = settings["hooks"]["PreToolUse"]
+    matchers = {e.get("matcher") for e in pre}
+    assert "Edit|Write|MultiEdit" in matchers
+    assert "Bash" not in matchers, f"Bash matcher should not be present; got {matchers}"
+
+
+def test_init_hook_no_edit_installs_only_bash(sample_repo, tmp_path):
+    """`init --hook --no-hook-edit` (existing) installs only the Bash rewrite hook."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    cmd = [sys.executable, "-m", "codeward.cli", "init", "--hook", "--no-hook-edit"]
+    result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    settings = json.loads((sample_repo / ".claude" / "settings.local.json").read_text())
+    pre = settings["hooks"]["PreToolUse"]
+    matchers = {e.get("matcher") for e in pre}
+    assert "Bash" in matchers
+    assert "Edit|Write|MultiEdit" not in matchers
+
+
+def test_init_hook_both_skip_flags_errors(sample_repo, tmp_path):
+    """Setting both --no-hook-bash and --no-hook-edit would install nothing —
+    error out instead of silently doing nothing useful."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    cmd = [sys.executable, "-m", "codeward.cli", "init", "--hook", "--no-hook-bash", "--no-hook-edit"]
+    result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert result.returncode == 2
+    assert "cannot both be set" in result.stderr
 
 
 def test_init_agent_refuses_when_rtk_present(sample_repo, tmp_path):

@@ -22,18 +22,24 @@ What could break if I edit this?   →  codeward preflight fastapi/routing.py  (
 
 ## Install
 
-```bash
-pip install codeward              # includes tree-sitter grammars + watchdog
-pip install codeward[full]        # backward-compatible alias
-```
-
-Python ≥ 3.11 required.
-
-Or via pipx:
+> **Note:** Codeward isn't on PyPI yet. For now, install from source:
 
 ```bash
-pipx install codeward
+git clone https://github.com/osirishorus/codeward.git
+cd codeward
+pip install -e .
 ```
+
+Or with pipx (recommended — gives you a global `codeward` command):
+
+```bash
+git clone https://github.com/osirishorus/codeward.git
+pipx install --editable ./codeward
+```
+
+Python ≥ 3.11 required. Tree-sitter grammars and `watchdog` are pulled in by default.
+
+Once Codeward lands on PyPI, this will become `pip install codeward` / `pipx install codeward` directly. Watch [releases](https://github.com/osirishorus/codeward/releases) for the announcement.
 
 ## Quick start
 
@@ -51,17 +57,21 @@ That's it — your agent will read CLAUDE.md/AGENTS.md and start using `codeward
 ## Optional: hook integration
 
 ```bash
-codeward init --hook              # project-local Bash + Edit/Write hooks
-codeward init --hook --global     # also wire ~/.claude/settings.json
-codeward init --hook --no-hook-edit  # Bash rewrite only, skip Edit preflight
+codeward init --hook                       # both Bash + Edit/Write hooks (project-local)
+codeward init --hook --global              # also wire ~/.claude/settings.json (global)
+codeward init --hook --no-hook-edit        # Bash rewrite only — skip Edit preflight
+codeward init --hook --no-hook-bash        # Edit/Write preflight only — skip Bash rewrite
+                                           # (recommended when RTK already owns Bash)
 ```
 
-This installs two `PreToolUse` entries in Claude Code:
+This installs `PreToolUse` entries in Claude Code, controlled independently:
 
-- **`matcher: "Bash"`** — rewrites `cat foo.py` → `codeward read foo.py` and tracks savings. Inserted *before* RTK's Bash entry; RTK passes `codeward ...` through unchanged.
-- **`matcher: "Edit|Write|MultiEdit"`** — runs `codeward preflight <file>` and injects dependents/tests/side-effects/security flags via `additionalContext` *before* the edit happens. RTK doesn't touch this surface — no clash.
+- **`matcher: "Bash"`** — rewrites `cat foo.py` → `codeward read foo.py` and tracks savings. Inserted *before* RTK's Bash entry; RTK passes `codeward ...` through unchanged. Skip with `--no-hook-bash` if you want RTK to handle the Bash surface alone.
+- **`matcher: "Edit|Write|MultiEdit"`** — runs `codeward preflight <file>` and injects dependents/tests/side-effects/security flags via `additionalContext` *before* the edit happens. RTK doesn't touch this surface — no clash possible. Skip with `--no-hook-edit` if you don't want pre-edit context.
 
-Run `codeward doctor` to verify ordering.
+The two hooks are independent. **The most common setup if you already use RTK:** `codeward init --hook --no-hook-bash` — gives you preflight context on edits without touching Bash compression (RTK keeps that lane).
+
+Run `codeward doctor` to verify ordering and which hooks are installed.
 
 ## Commands
 

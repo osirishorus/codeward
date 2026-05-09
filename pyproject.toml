@@ -24,7 +24,7 @@ classifiers = [
   "Operating System :: POSIX",
   "Operating System :: MacOS",
 ]
-authors = [{name = "Codeward contributors"}]
+authors = [{name = "osirishorus"}]
 
 [project.urls]
 Homepage      = "https://github.com/osirishorus/codeward"
