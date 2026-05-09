@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Symbol-level codebase intelligence for coding agents.</strong></p>
 
-Codeward gives your agent commands the shell can't: "where is this defined?", "who calls it?", "which tests cover it?", "what changed at the symbol level?", "what would break if I edit this file?". It indexes your repo with tree-sitter / Python AST and answers in compact, structured form.
+Codeward gives your agent commands the shell can't: "where is this defined?", "who calls it?", "which tests cover it?", "what changed at the symbol level?", "what would break if I edit this file?". It indexes your repo with tree-sitter / Python AST.
 
 ```text
 What does this repo do?            →  codeward map
@@ -20,50 +20,34 @@ What's the public API of this?     →  codeward api fastapi/applications.py
 What could break if I edit this?   →  codeward preflight fastapi/routing.py  (auto-injected on Edit/Write)
 ```
 
-The headline feature — the one thing in this category I haven't seen elsewhere — is **[preflight context injection](#preflight-blast-radius-context-before-edits)**: dependents, likely tests, side-effects, and blast radius pushed into the model's context *before* an Edit/Write tool call.
-
-Codeward doesn't replace [RTK](https://github.com/rtk-ai/rtk). They sit on different surfaces and most setups want both — see [How it composes with RTK](#how-it-composes-with-rtk) for the layering.
+Headline feature: **[preflight context injection](#preflight-blast-radius-context-before-edits)** — dependents, tests, side-effects, blast-radius pushed into the model *before* an Edit/Write call. Codeward composes with [RTK](https://github.com/rtk-ai/rtk) rather than replacing it ([details](#how-it-composes-with-rtk)).
 
 ## When not to use this
 
-Codeward is the wrong tool when:
+- **Chasing a specific bug, symbol already known** — raw `grep`/`sed` (with RTK compressing) is faster.
+- **Small repo (<500 LOC)** — index overhead doesn't pay off.
+- **Agent ignores `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` and no hooks installed** — Codeward sits unused.
 
-- **You're chasing one specific bug and already know the symbol name.** Raw `grep`/`sed` (with RTK compressing the output) gets you there faster than building/loading an index.
-- **The repo is small (<500 LOC, a handful of files).** The index overhead doesn't pay off.
-- **Your agent doesn't read `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` and you haven't installed the hooks.** Without vocabulary teaching or a hook surface, Codeward sits unused.
-
-If you only have budget for one tool: install **RTK** for general-purpose Bash compression. Add Codeward when refactor planning, cross-file impact analysis, or pre-edit blast-radius awareness becomes worth its weight.
+If budget for only one tool, install **RTK** first. Add Codeward for refactor planning, cross-file impact, or pre-edit blast-radius.
 
 ## Project status
 
-Codeward is a v0 (0.4.x) **from-source install**. What that means concretely:
+v0.4.x, **install from source**. CLI surface and JSON schema are stable across `0.4.x`.
 
-- **Solid:** the `core` commands listed below (`map`, `read`, `search`, `symbol`, `slice`, `refs`, `tests-for`, `impact`, `preflight`), the SQLite index with mtime invalidation, the Claude / Gemini hook adapters, the `--json` schema, the `gain` history.
-- **Maturity varies by language:** `callgraph`, `blame`, `sdiff`, `api`, `review --security`. These work, but precision differs across the eight supported languages — see the [Commands](#commands) table for the maturity tag on each.
-- **Not on PyPI yet.** Install from source until v0.5. The package layout, CLI surface, and JSON schema are stable across `0.4.x`.
+- **Solid:** core commands (`map`, `read`, `search`, `symbol`, `slice`, `refs`, `tests-for`, `impact`, `preflight`), SQLite index with mtime invalidation, Claude/Gemini hook adapters, `--json`, `gain` history.
+- **Maturity varies by language:** `callgraph`, `blame`, `sdiff`, `api`, `review --security` — see the [Commands](#commands) table.
 
 ## Install
 
 ```bash
 git clone https://github.com/osirishorus/codeward.git
-cd codeward
-pip install -e .
+pipx install --editable ./codeward     # recommended
+# or: cd codeward && pip install -e .
 ```
 
-Or with pipx (recommended — gives you a global `codeward` command):
-
-```bash
-git clone https://github.com/osirishorus/codeward.git
-pipx install --editable ./codeward
-```
-
-Python ≥ 3.11 required. Tree-sitter grammars (Go, Rust, TS/JS, Java, Ruby, PHP, C#) and `watchdog` are pulled in by default.
-
-When Codeward lands on PyPI this becomes `pipx install codeward` directly. Watch [releases](https://github.com/osirishorus/codeward/releases).
+Python ≥ 3.11. Tree-sitter grammars (Go, Rust, TS/JS, Java, Ruby, PHP, C#) and `watchdog` pulled in by default. PyPI release in v0.5 — watch [releases](https://github.com/osirishorus/codeward/releases).
 
 ## Quick start
-
-Inside any repository:
 
 ```bash
 codeward init      # writes CLAUDE.md + AGENTS.md vocabulary (no hooks)
@@ -71,34 +55,28 @@ codeward map       # repo overview — auto-builds the index on first run
 codeward doctor    # verify environment
 ```
 
-That's it. Your agent reads `CLAUDE.md`/`AGENTS.md` and starts using `codeward` commands when they fit.
-
-> **You don't need to run `codeward index` manually.** The first read-only command in a repo (`map`, `read`, `symbol`, …) walks the codebase and writes `.codeward/index.sqlite`. Subsequent commands load from that cache, with mtime-based invalidation.
-
-When you'd run `codeward index` explicitly: pre-warming a large repo before an agent session, CI setup scripts, or as a flush after large file rewrites. For long sessions, prefer `codeward watch` — a foreground re-indexer that keeps the SQLite cache hot via file events.
+The index auto-builds on the first read-only command and lives at `.codeward/index.sqlite` with mtime invalidation. Run `codeward index` only to pre-warm a large repo or in CI; for long sessions use `codeward watch` (foreground re-indexer).
 
 ## Optional: hook integration
 
 ```bash
-codeward init --hook                       # both Bash + Edit/Write hooks (project-local)
-codeward init --hook --global              # also wire ~/.claude/settings.json (global)
-codeward init --hook --no-hook-edit        # Bash rewrite only — skip Edit preflight
-codeward init --hook --no-hook-bash        # Edit/Write preflight only — skip Bash rewrite
-                                           # (recommended when RTK already owns Bash)
+codeward init --hook                    # both Bash + Edit/Write hooks (project-local)
+codeward init --hook --global           # also wire ~/.claude/settings.json
+codeward init --hook --no-hook-bash     # Edit/Write preflight only (recommended w/ RTK)
+codeward init --hook --no-hook-edit     # Bash rewrite only
+codeward init --hook --gemini           # also wire ~/.gemini/settings.json
 ```
 
-This installs `PreToolUse` entries in Claude Code, controlled independently:
+Two independent `PreToolUse` entries:
 
-- **`matcher: "Bash"`** — rewrites `cat foo.py` → `codeward read foo.py` and tracks savings. Inserted *before* RTK's Bash entry; RTK passes `codeward …` through unchanged. Skip with `--no-hook-bash` if you'd rather RTK own the Bash surface alone.
-- **`matcher: "Edit|Write|MultiEdit"`** — runs `codeward preflight <file>` and injects dependents/tests/side-effects/blast-radius via `additionalContext` *before* the edit happens. RTK doesn't touch this surface. Skip with `--no-hook-edit` if you don't want pre-edit context.
+- **`Bash`** — rewrites `cat foo.py` → `codeward read foo.py`. Inserted *before* RTK's Bash entry; RTK passes `codeward …` through.
+- **`Edit|Write|MultiEdit`** — runs `codeward preflight <file>` and injects `additionalContext` before the edit. Different matcher from RTK; cannot clash.
 
-The two hooks are independent. **The most common setup if you already use RTK:** `codeward init --hook --no-hook-bash` — preflight context on edits, no overlap with RTK's Bash compression.
-
-`codeward doctor` verifies (a) which hooks are installed, (b) that the Bash hook (if installed) is ordered **before** `rtk hook claude` in `~/.claude/settings.json` — if RTK ran first, it would compress `cat`/`grep` output before Codeward got a chance to rewrite them, defeating both layers — and (c) that the index is fresh.
+`codeward doctor` checks which hooks are installed, that the Bash hook is ordered **before** `rtk hook claude` (otherwise RTK runs first and compresses output before Codeward can rewrite), and that the index is fresh.
 
 ## Preflight: blast-radius context before edits
 
-When the Edit/Write hook is installed, Codeward injects a compact "what to know before changing this" payload as `additionalContext` *before* the edit reaches the model. Real example, captured from an actual edit to `fastapi/routing.py`:
+When the Edit/Write hook is installed, Codeward injects a compact `additionalContext` payload before the edit reaches the model. Real example from `fastapi/routing.py`:
 
 ```text
 # Codeward preflight: fastapi/routing.py
@@ -110,62 +88,56 @@ When the Edit/Write hook is installed, Codeward injects a compact "what to know 
   security flags: 0
 ```
 
-**149 tokens, injected once, on the right surface** — fires on `Edit`/`Write`/`MultiEdit`, not on `Grep` or `Read`. The agent receives this as part of its context for the edit and adapts: smaller patches on HIGH blast-radius files, awareness of which dependents/tests to consider, awareness of side effects (network, DB write, queue publish, etc.) the file actively performs.
+**149 tokens, once per Edit call, on the right surface** — fires on `Edit`/`Write`/`MultiEdit`, not on `Grep` or `Read`. The agent adapts: smaller patches on HIGH blast-radius, awareness of dependents/tests/side-effects.
 
-What goes in the payload is configurable via `.codeward/config.toml` (custom side-effect rules, ignored directories, extra test paths). The design constraint is signal-to-noise: enough to inform, not enough to drown the rest of the prompt.
-
-Verified end-to-end on the FastAPI repo: hook fires once per Edit tool call, agent acknowledges the context, edit content is identical to the no-hook baseline (the agent doesn't get distracted — it gets informed). Full transcript in [docs/BENCHMARKS.md#editwrite-benchmark](docs/BENCHMARKS.md#editwrite-benchmark--preflight-hook-in-action).
+Payload contents are configurable via `.codeward/config.toml` (custom side-effect rules, ignored dirs, extra test paths). End-to-end transcript: [docs/BENCHMARKS.md](docs/BENCHMARKS.md#editwrite-benchmark--preflight-hook-in-action).
 
 ## Commands
 
 ### Core (load-bearing, exercised in benchmarks)
 
-All read-only commands support `--json` with a stable schema.
+All read-only commands support `--json`.
 
 | Command | What it does | Replaces |
 |---|---|---|
 | `codeward map` | Repo overview: language, important files, suggested next steps | `find . -maxdepth 3 -type f` |
-| `codeward read <file>` | Symbols + signatures + dependents + tests + side effects (`--flow` adds compact method bodies) | `cat <file>` |
+| `codeward read <file>` | Symbols + signatures + dependents + tests + side effects (`--flow` adds method bodies) | `cat <file>` |
 | `codeward search <query>` | Index-grouped search hits | `grep -rn <query>` |
-| `codeward symbol <name>` | Definition + confidence-ranked callers + tests | grep + sed |
-| `codeward slice <Class.method>` | **Exact bytes of one method** when AST/tree-sitter ranges exist | `sed -n 'X,Yp'` |
-| `codeward refs <symbol>` | Confidence-ranked reference sites (file:line) | recursive grep |
+| `codeward symbol <name>` | Definition + ranked callers + tests | grep + sed |
+| `codeward slice <Class.method>` | **Exact bytes of one method** | `sed -n 'X,Yp'` |
+| `codeward refs <symbol>` | Ranked reference sites (file:line) | recursive grep |
 | `codeward tests-for <target>` | Likely covering tests | guessing |
-| `codeward impact [--changed\|<target>]` | Dependents + tests + risk for changed files | manual review |
-| `codeward preflight <file>` | Compact "what to know before editing this" — see [section above](#preflight-blast-radius-context-before-edits) | n/a |
+| `codeward impact [--changed\|<target>]` | Dependents + tests + risk | manual review |
+| `codeward preflight <file>` | "What to know before editing this" — see [above](#preflight-blast-radius-context-before-edits) | n/a |
 
 ### Maturity varies by language
 
-These commands work, but precision depends on which analyzer fires for the file in question. The `doctor` command surfaces analyzer coverage; each command annotates rows with `analyzer`/`precision`/`confidence` in `--json` output.
+Precision depends on the analyzer for the file. `--json` output annotates each row with `analyzer`/`precision`/`confidence`.
 
-| Command | What it does | Best on | Falls back to |
-|---|---|---|---|
-| `codeward callgraph <route\|symbol>` | Confidence-ranked flow summary | Python AST: high precision | tree-sitter (TS/Go/Rust/etc.): syntax-aware; regex: heuristic |
-| `codeward blame <symbol>` | `git blame` aggregated by author over the symbol's range | Languages with extracted method ranges (Py + tree-sitter set) | File-level blame |
-| `codeward sdiff [--base <ref>]` | **Symbols** added/removed/changed (not raw lines) | Python + tree-sitter languages | Raw diff with file-level summary |
-| `codeward api <file-or-dir>` | Public API surface (top-level non-underscore) | Python (`__all__` aware), TypeScript | Best-effort symbol enumeration |
-| `codeward review [--changed] [--security]` | Pre-commit semantic + pattern-based security review | All languages, but security checks are heuristic — not a SAST replacement | — |
+| Command | What it does | Best on |
+|---|---|---|
+| `codeward callgraph <route\|symbol>` | Confidence-ranked flow summary | Python AST → high; tree-sitter → syntax-aware; regex fallback |
+| `codeward blame <symbol>` | `git blame` aggregated by author over the symbol's range | Languages with extracted method ranges (Py + tree-sitter) |
+| `codeward sdiff [--base <ref>]` | **Symbols** added/removed/changed | Python + tree-sitter languages |
+| `codeward api <file-or-dir>` | Public API surface (top-level non-underscore) | Python (`__all__` aware), TypeScript |
+| `codeward review [--changed] [--security]` | Pre-commit semantic + heuristic security review | All languages — security checks are pattern-based, not SAST |
 
-### Operations
+### Operations & adapters
 
-- `codeward gain [--global\|--all]` — token savings history (per-repo and global), formatted like `rtk gain`
-- `codeward doctor` — environment / hook ordering / index health check
-- `codeward index [--output PATH]` — explicitly persist `.codeward/index.sqlite` (rarely needed; auto-builds)
-- `codeward watch [--debounce 0.5]` — foreground re-indexer; keeps SQLite hot via file events
-
-### Install / adapters
-
+- `codeward gain [--global\|--all]` — token savings history (per-repo + global), formatted like `rtk gain`
+- `codeward doctor` — environment / hook ordering / index health
+- `codeward index` / `codeward watch` — explicit / continuous indexing
 - `codeward init [--hook] [--global] [--gemini] [--no-hook-bash] [--no-hook-edit]` — vocabulary + optional hooks
-- `codeward init-agent [--force]` — PATH shims for Codex / Aider / shell agents (refuses by default if RTK detected)
+- `codeward init-agent [--force]` — PATH shims for Codex / Aider / shell agents (refuses if RTK detected)
 - `codeward hook --agent {claude,cursor,gemini,generic}` — agent hook adapter (stdin → stdout)
 
 ### Deferred to RTK when present
 
-`codeward status`, `codeward diff`, `codeward test` defer to `rtk` when RTK is on PATH (their core competency). Pass `--force` to use the Codeward variant.
+`codeward status`, `codeward diff`, `codeward test` defer to `rtk` when RTK is on PATH. Pass `--force` to use the Codeward variant.
 
-## Per-repo configuration
+## Configuration
 
-Drop `.codeward/config.toml` for custom rules:
+Drop `.codeward/config.toml`:
 
 ```toml
 [index]
@@ -177,63 +149,42 @@ pattern = '\baudit_log\s*\('
 label = "Audit log"
 ```
 
-The full schema (currently ~12 keys across `[index]`, `[side_effects]`, `[security]`, `[preflight]`): [docs/CONFIG.md](docs/CONFIG.md).
+Full schema (~12 keys across `[index]`, `[side_effects]`, `[security]`, `[preflight]`): [docs/CONFIG.md](docs/CONFIG.md).
 
 ## JSON output
-
-Every read-only command supports `--json` with a stable schema:
 
 ```bash
 codeward read --json src/foo.py | jq '.symbols[] | .signature'
 codeward refs --json UserService | jq '.references | length'
 ```
 
-Schema: [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md). Symbol and reference rows include `analyzer`, `precision`, and `confidence` — Python AST is high-confidence; tree-sitter languages are syntax-aware; regex fallbacks are explicitly labeled heuristic.
+Schema: [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md). Rows include `analyzer`/`precision`/`confidence` — Python AST is high-confidence, tree-sitter is syntax-aware, regex fallbacks are explicitly heuristic.
 
 ## Agent integrations
 
-The four major agents have very different hook architectures. Codeward meets each in its native shape:
-
-| Agent | Native hook system? | What `codeward init` gives you | How it actually fires |
-|---|---|---|---|
-| **Claude Code** | ✅ `PreToolUse` array with matchers | `--hook` (project) / `--hook --global` writes `~/.claude/settings.json` automatically. Two matchers: `Bash` (rewrite) and `Edit\|Write\|MultiEdit` (preflight) | Claude pipes tool-call JSON to the hook script, which runs `codeward hook --agent claude` and returns `updatedInput` (Bash) or `additionalContext` (Edit/Write) |
-| **Gemini CLI** | ✅ `BeforeTool` array with matchers | `--gemini` writes `~/.gemini/settings.json` automatically (matcher: `run_shell_command`) | Gemini invokes `codeward hook --agent gemini` on every shell call; gets back `updated_input.command` |
-| **Cursor** | ✅ Extension API | None automatic — paste `codeward hook --agent cursor` into a Cursor plugin manually | Cursor extension sends JSON, gets `permission` + `updated_input` |
-| **Codex (OpenAI)** | ❌ No shell hook | No hook; relies on vocabulary only. `~/.codex/AGENTS.md` is written by `codeward init --global`; Codex chooses to invoke `codeward` directly when the task fits | Or: `codeward init-agent` writes PATH shims under `.codeward/bin/` to force-rewrite `cat`/`grep`/etc. (refuses if RTK detected — `--force` to override) |
-| **Aider / OpenCode / shell agents** | ❌ No hook | Same as Codex — vocabulary in `AGENTS.md` + optional PATH shims via `init-agent` | OpenCode plugin can call `codeward run --dry-run --shell-command "<cmd>"` and mutate the command if rewritten |
-| **Custom wrappers** | varies | n/a | `codeward hook --agent generic` returns `{updatedInput: {command: …}}` for any wrapper that consumes that shape |
-
-### Install matrix
+| Agent | Native hook? | What `codeward init` gives you |
+|---|---|---|
+| **Claude Code** | ✅ `PreToolUse` | `--hook` / `--hook --global` writes `~/.claude/settings.json`. Two matchers: `Bash` (rewrite) + `Edit\|Write\|MultiEdit` (preflight) |
+| **Gemini CLI** | ✅ `BeforeTool` | `--gemini` writes `~/.gemini/settings.json` (matcher: `run_shell_command`) |
+| **Cursor** | ✅ Extension API | None automatic — paste `codeward hook --agent cursor` into a Cursor plugin |
+| **Codex** | ❌ no shell hook | Vocabulary only via `~/.codex/AGENTS.md` (written by `init --global`); or `init-agent` for PATH shims |
+| **Aider / OpenCode / shell agents** | ❌ no shell hook | Same as Codex — vocabulary + optional `init-agent` shims |
 
 ```bash
-# Claude Code, project-local
-codeward init --hook
-
-# Claude Code, globally (every repo)
-codeward init --hook --global
-
-# Claude Code, edit-preflight only (recommended when RTK already owns Bash)
-codeward init --hook --no-hook-bash
-
-# Gemini CLI, globally
-codeward init --hook --gemini
-
-# Everything everywhere (Claude global + Gemini global + global memory files)
-codeward init --hook --global --gemini
-
-# Codex / Aider / shell agents — vocabulary only (no shell-hook surface available)
-codeward init --global              # writes ~/.codex/AGENTS.md, ~/.gemini/GEMINI.md too
-
-# Codex / Aider — force-rewrite via PATH shims (alternative when vocab isn't enough)
-codeward init-agent
-export PATH="$PWD/.codeward/bin:$PATH"
+# Most common combinations
+codeward init --hook                          # Claude, project-local
+codeward init --hook --global                 # Claude, every repo
+codeward init --hook --no-hook-bash           # Claude edit-preflight only (w/ RTK)
+codeward init --hook --global --gemini        # Claude + Gemini, global
+codeward init --global                        # vocab only (writes CLAUDE/AGENTS/GEMINI.md)
+codeward init-agent && export PATH="$PWD/.codeward/bin:$PATH"   # Codex/Aider PATH shims
 ```
 
 ## Case study: refactor on FastAPI
 
-One task, one repo, three agents — a case study, not a benchmark suite. Full numbers (six Claude task variants, Edit/Write hook trace, Go/gin and Python compression sessions) in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+One task, three agents. Full numbers (six Claude task variants, Edit/Write hook trace, Go/gin sessions): [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-**Task:** "find every callsite of `APIRoute.get_route_handler` and produce a refactor plan." Same prompt, same model, same `--max-turns`. Baseline = clean clone. Codeward = `init` + `index`.
+**Task:** "find every callsite of `APIRoute.get_route_handler` and produce a refactor plan." Same prompt, same model, same `--max-turns`.
 
 | Agent | Shell cmds | Headline savings |
 |---|---|---|
@@ -241,59 +192,44 @@ One task, one repo, three agents — a case study, not a benchmark suite. Full n
 | **Codex** gpt-5 | 15 → 12 (−20%) | Output tokens **−18%** (3,649 → 2,990) |
 | **Gemini** 3-flash-preview | 44 → 19 (−57%) | Input tokens **−60%** (954k → 386k) |
 
-Each row uses the most representative axis its CLI/SDK exposes — Anthropic surfaces `tool_tokens` but not input/output split; Codex/Gemini surface input/output but not tool-token isolation.
+Each row uses the most representative axis its CLI/SDK exposes. Cost is omitted — token counts are stable, per-token cost depends on model choice and changes monthly.
 
-**On the Gemini number.** Its baseline ran 44 commands vs Claude's 18 / Codex's 15 — vanilla Gemini was floundering on this task, so the −60% reflects how much guidance helps a looping agent. **Codex's −18% is the more conservative real-world expectation.** Both are real wins; different shapes.
+**On the Gemini number.** Vanilla Gemini ran 44 cmds vs Claude's 18 / Codex's 15 — it was floundering, so −60% reflects how much guidance helps a looping agent. **Codex's −18% is the more conservative real-world expectation.**
 
 **Claude wins without calling `codeward` once** — it reads `CLAUDE.md` and adopts the "scope first, then targeted reads" idiom Codeward teaches. The teaching does the work.
 
-### Per-command compression — separate from the case study
+### Per-command compression
 
-Whenever an agent invokes `codeward` directly, the output is measured against the raw shell analogue (`cat fastapi/routing.py` ≈ 200KB vs `codeward slice APIRoute.get_route_handler` ≈ 700 tokens). Recorded by `codeward gain`. In a 17-call FastAPI planning session: **561,579 tokens saved (85.2%) compared to the raw shell equivalents** — durable per-call compression, independent of how many turns the task takes.
+Separate measurement: raw shell analogue vs `codeward` output, recorded by `codeward gain`. In a 17-call FastAPI session: **561,579 tokens saved (85.2%)**. A `codeward slice` returning 700 tokens vs `cat`'s 50,000 is a 70× reduction even when turn count is identical — durable per-call savings independent of task length.
 
-For long, context-budget-constrained sessions, per-command compression matters more than headline turn-count numbers. A single `codeward slice` returning 700 tokens vs `cat`'s 50,000 is a 70× context-pressure reduction even when turn count is identical.
+### Across six Claude tasks (qualitative)
 
-### Where the case study extrapolates well, and where it doesn't
-
-This is one task. With that caveat very firmly stated, the qualitative observations from the broader six-task Claude run (in BENCHMARKS.md) are:
-
-- **Refactor / find-all-callsites / cross-cutting impact** — Codeward wins consistently. Up to **−49% tool tokens (Claude)**, **−18% output (Codex)**, **−60% input (Gemini, with the floundering caveat above)**.
-- **Cross-language orientation** — Go/gin showed −30% tool tokens; tree-sitter delivers accurate symbol extraction where regex would fail.
-- **Architecture overviews / code review** — Roughly tie. The agent uses lots of `codeward`, but extra turns offset per-call savings.
-- **Targeted bug-finding when the agent already knows the symbol** — Codeward is **net-negative**. Raw grep+sed with RTK compression is faster.
-
-Cost is intentionally not in any of these tables: token counts are stable across this document's lifetime; per-token cost depends on which model you choose and changes monthly. The unit that survives is the unit we report.
+- **Refactor / find-all-callsites / cross-cutting impact** — wins consistently. **−49% tool tokens (Claude)**, **−18% output (Codex)**, **−60% input (Gemini, with caveat above)**.
+- **Cross-language orientation** — Go/gin showed −30% tool tokens; tree-sitter beats regex.
+- **Architecture overview / code review** — roughly tie. Per-call savings offset by extra turns.
+- **Targeted bug-finding when symbol is known** — **net-negative**. Raw grep+sed with RTK is faster.
 
 ## How it composes with RTK
 
-Codeward is heavily inspired by [RTK (Rust Token Killer)](https://github.com/rtk-ai/rtk). RTK pioneered the "wrap your agent's shell commands and minify the output" approach — single Rust binary, transparent hook, real measurable token reductions on every `cat`/`grep`/`git status`. Several design choices Codeward inherits (`gain` history, `--json` output, hook-adapter shape for Claude/Cursor/Gemini, deferral semantics) are RTK's. Credit where it's due.
+Codeward is heavily inspired by [RTK](https://github.com/rtk-ai/rtk). RTK pioneered the "wrap shell commands and minify output" approach for coding agents — `gain` history, `--json`, the hook-adapter shape Codeward uses for Claude/Cursor/Gemini, deferral semantics. Credit where it's due.
 
-The two tools sit on different surfaces:
+The two sit on different surfaces:
 
-- **RTK** — Bash output compression. Runs `cat`/`grep`/`find`/`git status`/`pytest` and minifies what comes back. Stable, fast, broad.
-- **Codeward** — symbol-level semantic queries the shell can't answer. `slice`, `refs`, `blame`, `sdiff`, `api`, `preflight`. A compressor only sees the bytes a tool printed; Codeward parses your repo and answers structural questions about it.
+- **RTK** — Bash output compression (`cat`/`grep`/`find`/`git status`/`pytest`). Stable, fast, broad.
+- **Codeward** — symbol-level queries the shell can't answer (`slice`/`refs`/`blame`/`sdiff`/`api`/`preflight`).
 
-The Bash hook (when enabled) orders before RTK's. RTK passes `codeward …` through unchanged. The Edit/Write hook is on a different matcher entirely (`Edit|Write|MultiEdit`) — RTK doesn't touch it. No way for them to clash; `codeward doctor` verifies the ordering.
+Codeward's Bash hook orders before RTK's; RTK passes `codeward …` through. Edit/Write hook is on a different matcher; no overlap. `codeward doctor` verifies the ordering.
 
-If you only have budget for one tool: **install RTK first.** Add Codeward when you want symbol-level queries or pre-edit blast-radius context.
+If you can install only one, install **RTK** first.
 
 ## Documentation
 
 - [docs/GUIDE.md](docs/GUIDE.md) — full user / integration guide
-- [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md) — `--json` output schema
+- [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md) — `--json` schema
 - [docs/CONFIG.md](docs/CONFIG.md) — `.codeward/config.toml` reference
-- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — full A/B numbers (six tasks on Claude + cross-agent + Edit/Write trace)
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — full A/B numbers
 - [docs/PLAN.md](docs/PLAN.md) — roadmap
 - [CHANGELOG.md](CHANGELOG.md) — release history
-
-## Development
-
-```bash
-git clone https://github.com/osirishorus/codeward.git
-cd codeward
-python3 -m pip install -e .
-python3 -m pytest tests/ -q
-```
 
 ## License
 
