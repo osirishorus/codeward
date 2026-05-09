@@ -645,6 +645,56 @@ def test_init_hook_no_edit_installs_only_bash(sample_repo, tmp_path):
     assert "Edit|Write|MultiEdit" not in matchers
 
 
+def test_init_hook_gemini_writes_before_tool_entry(sample_repo, tmp_path):
+    """`init --hook --gemini` writes a BeforeTool/run_shell_command entry to
+    ~/.gemini/settings.json so Gemini CLI invokes `codeward hook --agent gemini`
+    on every shell call. Idempotent on re-run."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".gemini").mkdir(parents=True)
+    # Pre-populate settings.json with unrelated existing config — must be preserved
+    (fake_home / ".gemini" / "settings.json").write_text(json.dumps({
+        "general": {"previewFeatures": True},
+        "security": {"auth": {"selectedType": "oauth-personal"}},
+    }))
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    cmd = [sys.executable, "-m", "codeward.cli", "init", "--hook", "--gemini"]
+    result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    settings = json.loads((fake_home / ".gemini" / "settings.json").read_text())
+    # Existing config preserved
+    assert settings["general"]["previewFeatures"] is True
+    assert settings["security"]["auth"]["selectedType"] == "oauth-personal"
+    # Hook section added
+    before = settings["hooks"]["BeforeTool"]
+    assert any(
+        e.get("matcher") == "run_shell_command"
+        and any("codeward" in (h.get("command") or "") for h in (e.get("hooks") or []))
+        for e in before
+    ), settings
+    # Idempotent on re-run
+    second = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert second.returncode == 0
+    settings2 = json.loads((fake_home / ".gemini" / "settings.json").read_text())
+    cs_entries = [
+        e for e in settings2["hooks"]["BeforeTool"]
+        if e.get("matcher") == "run_shell_command"
+        and any("codeward" in (h.get("command") or "") for h in (e.get("hooks") or []))
+    ]
+    assert len(cs_entries) == 1, f"expected exactly 1 codeward entry, got {len(cs_entries)}"
+
+
+def test_init_gemini_skipped_when_dir_missing(sample_repo, tmp_path):
+    """If ~/.gemini doesn't exist (Gemini CLI not installed), skip with a notice."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    cmd = [sys.executable, "-m", "codeward.cli", "init", "--hook", "--gemini"]
+    result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    assert "Skipped Gemini hook" in result.stdout
+    assert not (fake_home / ".gemini").exists()
+
+
 def test_init_hook_both_skip_flags_errors(sample_repo, tmp_path):
     """Setting both --no-hook-bash and --no-hook-edit would install nothing —
     error out instead of silently doing nothing useful."""

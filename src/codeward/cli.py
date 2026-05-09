@@ -1437,6 +1437,52 @@ def _command_first_token(command: str) -> str:
     return Path(parts[0]).name
 
 
+def insert_gemini_hook_entry(settings_path: Path, hook_command: str = "codeward hook --agent gemini") -> str:
+    """Idempotently install a Gemini CLI BeforeTool/run_shell_command hook.
+    Writes to the same `~/.gemini/settings.json` file Gemini already uses for
+    auth/general/agents config — adds a sibling `hooks` section. Returns
+    'added' or 'noop'. Raises RuntimeError on malformed JSON, never overwrites
+    silently."""
+    data: dict = {}
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            backup = settings_path.with_suffix(settings_path.suffix + ".broken")
+            backup.write_text(settings_path.read_text())
+            raise RuntimeError(
+                f"{settings_path} is malformed JSON. Saved a copy at {backup} and refused to overwrite."
+            )
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{settings_path} top-level value is not a JSON object; refusing to mutate.")
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise RuntimeError(f"{settings_path}: 'hooks' is not an object; refusing to mutate.")
+    before = hooks.setdefault("BeforeTool", [])
+    if not isinstance(before, list):
+        raise RuntimeError(f"{settings_path}: 'hooks.BeforeTool' is not a list; refusing to mutate.")
+
+    def is_codeward(entry) -> bool:
+        if not isinstance(entry, dict) or entry.get("matcher") != "run_shell_command":
+            return False
+        for h in entry.get("hooks") or []:
+            if isinstance(h, dict) and "codeward" in str(h.get("command", "")):
+                return True
+        return False
+
+    if any(is_codeward(e) for e in before):
+        return "noop"
+    before.append({
+        "matcher": "run_shell_command",
+        "hooks": [{"type": "command", "name": "codeward-rewrite", "command": hook_command}],
+    })
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = settings_path.with_suffix(settings_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(settings_path)
+    return "added"
+
+
 def insert_edit_hook_entry(settings_path: Path, hook_command: str, matcher: str = "Edit|Write|MultiEdit") -> str:
     """Idempotently install a PreToolUse hook for Edit/Write tools that injects
     `codeward preflight` info via additionalContext. Doesn't clash with RTK
@@ -1644,6 +1690,22 @@ def cmd_init(args) -> int:
             insert_edit_hook_entry(global_settings, "codeward hook --agent claude")
             print(f"Installed global Edit/Write preflight hook into {global_settings}.")
 
+    # Gemini CLI hook: same shape (run_shell_command BeforeTool) — different
+    # config file. Off by default unless --gemini is passed.
+    if getattr(args, "install_gemini_hook", False):
+        gemini_settings = Path.home() / ".gemini" / "settings.json"
+        if not gemini_settings.parent.exists():
+            print(f"Skipped Gemini hook: {gemini_settings.parent} doesn't exist (Gemini CLI not installed?)")
+        else:
+            try:
+                outcome = insert_gemini_hook_entry(gemini_settings)
+                if outcome == "added":
+                    print(f"Installed Gemini BeforeTool/run_shell_command hook into {gemini_settings}.")
+                else:
+                    print(f"Gemini hook already present in {gemini_settings} (no change).")
+            except RuntimeError as e:
+                print(f"Gemini hook install failed: {e}", file=sys.stderr)
+
     if rtk_present and not no_bash:
         print("RTK is active. Codeward will rewrite to `codeward ...` first; RTK passes those through unchanged.")
     if not no_bash:
@@ -1712,6 +1774,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Also write semantic vocabulary to each agent's GLOBAL memory file "
                       "(~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.gemini/GEMINI.md). "
                       "When combined with --hook, additionally wires ~/.claude/settings.json.")
+    init.add_argument("--gemini", dest="install_gemini_hook", action="store_true",
+                      help="Also install the Gemini CLI BeforeTool/run_shell_command hook in ~/.gemini/settings.json")
     init.add_argument("--no-hook-bash", action="store_true",
                       help="Skip the Bash rewrite hook (install only the Edit/Write preflight). "
                       "Useful when RTK already owns the Bash surface and you just want pre-edit context.")

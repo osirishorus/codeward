@@ -150,13 +150,42 @@ regex fallbacks are explicitly labeled heuristic.
 
 ## Agent integrations
 
-| Agent | Integration |
-|---|---|
-| Claude Code | `codeward init` (vocab) → optional `--hook` for Bash + Edit/Write hooks |
-| Cursor | `codeward hook --agent cursor` for `BeforeShellExecution` |
-| Gemini CLI | `codeward hook --agent gemini` for `BeforeTool` / `run_shell_command` |
-| Codex / Aider / OpenCode | `codeward init-agent` writes PATH shims at `.codeward/bin/`; agent reads `AGENTS.md` |
-| Custom wrappers | `codeward hook --agent generic` returns `{updatedInput: {...}}` |
+The four major agents have very different hook architectures. Codeward meets each one in its native shape:
+
+| Agent | Native hook system? | What `codeward init` gives you | How it actually fires |
+|---|---|---|---|
+| **Claude Code** | ✅ `PreToolUse` array with matchers | `--hook` (project) / `--hook --global` writes `~/.claude/settings.json` automatically. Two matchers: `Bash` (rewrite) and `Edit\|Write\|MultiEdit` (preflight) | Claude pipes tool-call JSON to the hook script, which runs `codeward hook --agent claude` and returns `updatedInput` (Bash) or `additionalContext` (Edit/Write) |
+| **Gemini CLI** | ✅ `BeforeTool` array with matchers | `--gemini` writes `~/.gemini/settings.json` automatically (matcher: `run_shell_command`) | Gemini invokes `codeward hook --agent gemini` on every shell call; gets back `updated_input.command` |
+| **Cursor** | ✅ Extension API | None automatic — paste `codeward hook --agent cursor` into a Cursor plugin manually | Cursor extension sends JSON, gets `permission` + `updated_input` |
+| **Codex (OpenAI)** | ❌ No shell hook | No hook; relies on vocabulary only. `~/.codex/AGENTS.md` is written by `codeward init --global` and Codex chooses to invoke `codeward` directly when the task fits | Or: `codeward init-agent` writes PATH shims under `.codeward/bin/` to force-rewrite `cat`/`grep`/etc. (refuses by default if RTK detected — `--force` to override) |
+| **Aider / OpenCode / shell agents** | ❌ No hook | Same as Codex — vocabulary in `AGENTS.md` + optional PATH shims via `init-agent` | OpenCode plugin can call `codeward run --dry-run --shell-command "<cmd>"` and mutate the command if rewritten |
+| **Custom wrappers** | varies | n/a | `codeward hook --agent generic` returns `{updatedInput: {command: ...}}` for any wrapper that consumes that shape |
+
+### Install matrix
+
+```bash
+# Claude Code, project-local
+codeward init --hook
+
+# Claude Code, globally (every repo)
+codeward init --hook --global
+
+# Claude Code, edit-preflight only (recommended when RTK already owns Bash)
+codeward init --hook --no-hook-bash
+
+# Gemini CLI, globally
+codeward init --hook --gemini
+
+# Everything everywhere (Claude global + Gemini global + global memory files)
+codeward init --hook --global --gemini
+
+# Codex / Aider / shell agents — vocabulary only (no shell-hook surface available)
+codeward init --global              # writes ~/.codex/AGENTS.md, ~/.gemini/GEMINI.md too
+
+# Codex / Aider — force-rewrite via PATH shims (alternative when vocab isn't enough)
+codeward init-agent
+export PATH="$PWD/.codeward/bin:$PATH"
+```
 
 ## How it composes with RTK
 
