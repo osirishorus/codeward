@@ -231,21 +231,21 @@ export PATH="$PWD/.codeward/bin:$PATH"
 
 ## Case study: refactor on FastAPI
 
-This is **one task on one repo across three agents** — a case study, not a benchmark suite. The full numbers (six task variants on Claude, plus Edit/Write hook trace, plus Go/gin and Python compression sessions) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+One task, one repo, three agents — a case study, not a benchmark suite. Full numbers (six Claude task variants, Edit/Write hook trace, Go/gin and Python compression sessions) in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-**Task:** "find every callsite of `APIRoute.get_route_handler` in the FastAPI repo and produce a refactor plan." Same prompt, same model per agent, same `--max-turns`. Baseline = clean clone, no Codeward. Codeward = `codeward init` + `codeward index`, agent invokes `codeward` when CLAUDE.md/AGENTS.md guidance matches.
+**Task:** "find every callsite of `APIRoute.get_route_handler` and produce a refactor plan." Same prompt, same model, same `--max-turns`. Baseline = clean clone. Codeward = `init` + `index`.
 
-| Agent | Shell cmds (base→codeward) | Headline savings |
+| Agent | Shell cmds | Headline savings |
 |---|---|---|
 | **Claude** Sonnet 4.6 | 18 → 11 (−39%) | Tool tokens **−49%** (5,524 → 2,837) |
 | **Codex** gpt-5 | 15 → 12 (−20%) | Output tokens **−18%** (3,649 → 2,990) |
-| **Gemini** 3-flash-preview | 44 → 19 (−57%) | Input tokens **−60%** (954k → 386k); API calls −56% |
+| **Gemini** 3-flash-preview | 44 → 19 (−57%) | Input tokens **−60%** (954k → 386k) |
 
-> **Each row uses the most representative axis the agent's CLI/SDK exposes.** Anthropic surfaces `tool_tokens` (text Bash returned to the model — the actual context-pressure metric) but not raw input/output split; Codex/Gemini headless modes surface input/output but not tool-token isolation. There is no single shared metric for all three.
+Each row uses the most representative axis its CLI/SDK exposes — Anthropic surfaces `tool_tokens` but not input/output split; Codex/Gemini surface input/output but not tool-token isolation.
 
-**Reading the Gemini result honestly.** Gemini's baseline ran 44 shell commands and 48 API calls on a task Claude finished in 18 commands and Codex in 15. That suggests Gemini's vanilla strategy on this task was floundering — not that Codeward is uniquely 60% effective. **Codex's −18% output / −20% commands is the more conservative real-world expectation** for an agent that already knows how to navigate codebases; Gemini's larger delta reflects how much more guidance benefits an agent that was looping. Both are real wins; they're just different shapes of win.
+**On the Gemini number.** Its baseline ran 44 commands vs Claude's 18 / Codex's 15 — vanilla Gemini was floundering on this task, so the −60% reflects how much guidance helps a looping agent. **Codex's −18% is the more conservative real-world expectation.** Both are real wins; different shapes.
 
-**Why Claude wins without ever calling `codeward` directly.** Claude reads `CLAUDE.md` at session start and adopts the idiom Codeward teaches — "scope first with `wc -l`, then targeted reads instead of `cat` of large files." The teaching does the work; the binary doesn't have to.
+**Claude wins without calling `codeward` once** — it reads `CLAUDE.md` and adopts the "scope first, then targeted reads" idiom Codeward teaches. The teaching does the work.
 
 ### Per-command compression — separate from the case study
 
