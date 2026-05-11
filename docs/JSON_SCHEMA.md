@@ -189,18 +189,21 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
 {"command": "diff", "stat": " src/foo.py | 12 +++++------\n 1 file changed, 6 insertions(+), 6 deletions(-)\n"}
 ```
 
-## `codeward gain --json`
+## `codeward gain --json [--repo|--all]`
 
 ```json
 {
   "command": "gain",
+  "scope": "global",
   "rows": [
-    {"ts": 1778277470.5, "command": "direct: codeward read rich/console.py", "raw_tokens": 33929, "output_tokens": 1718, "saved_tokens": 32211}
+    {"ts": 1778277470.5, "command": "direct: codeward read rich/console.py", "raw_tokens": 33929, "output_tokens": 1718, "saved_tokens": 32211, "repo": "/home/me/projects/example"}
   ],
   "summary": {"commands_tracked": 1, "tokens_saved": 32211, "raw_tokens": 33929, "pct_saved": 94.94},
   "rtk_active": true
 }
 ```
+
+`scope` is `global` (default — aggregated across all repos), `repo` (just the current repo), or `all` (deduped union). Rows in `global`/`all` scope carry a `repo` field with the originating repo's absolute path.
 
 ## `codeward budget --json [target]`
 

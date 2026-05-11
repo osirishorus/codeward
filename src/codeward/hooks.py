@@ -317,30 +317,28 @@ def _format_gain_row(r: dict, width: int = 50) -> list[str]:
     saved = r.get("saved_tokens", 0)
     pct = (saved / raw * 100) if raw else 0
     kind, original, rewritten = parse_command_field(r.get("command", ""))
-    repo = r.get("repo", "")
-    repo_tag = f"  [{Path(repo).name}]" if repo else ""
     lines = []
     if original != rewritten:
-        lines.append(f"  {original}{repo_tag}")
+        lines.append(f"  {original}")
         lines.append(f"    → {rewritten}")
     else:
-        lines.append(f"  {rewritten}{repo_tag}")
+        lines.append(f"  {rewritten}")
     lines.append(f"    raw {raw:>6} → cs {out_t:>5}    saved {saved:>6} ({pct:>5.1f}%)")
     return lines
 
 
-def gain(root: Path, *, scope: str = "repo") -> str:
+def gain(root: Path, *, scope: str = "global") -> str:
     """Render token-savings history.
 
     scope=
-      'repo'    : just <root>/.codeward/history.jsonl                (default)
-      'global'  : just ~/.codeward/history.jsonl                     (all repos)
+      'global'  : ~/.codeward/history.jsonl  — aggregated across all repos (default)
+      'repo'    : just <root>/.codeward/history.jsonl                (opt in via --repo)
       'all'     : aggregate of both (deduplicated by ts+command)
     """
-    if scope == "global":
-        rows = _read_history(global_history_path())
-        title = "Codeward global token savings"
-        empty = f"No global history yet at {global_history_path()}."
+    if scope == "repo":
+        rows = _read_history(root / HISTORY)
+        title = "Codeward token savings (this repo)"
+        empty = "No Codeward history in this repo yet. Run `codeward read <file>` or `codeward init --hook`."
     elif scope == "all":
         local = _read_history(root / HISTORY)
         global_rows = _read_history(global_history_path())
@@ -355,9 +353,9 @@ def gain(root: Path, *, scope: str = "repo") -> str:
         title = "Codeward token savings (all repos + global)"
         empty = "No Codeward history yet. Run a `codeward read`/`slice`/etc. command, or enable hooks."
     else:
-        rows = _read_history(root / HISTORY)
-        title = f"Codeward token savings  [{root.name}]"
-        empty = "No Codeward history in this repo yet. Run `codeward read <file>` or `codeward init --hook`."
+        rows = _read_history(global_history_path())
+        title = "Codeward token savings (all repos)"
+        empty = f"No history yet at {global_history_path()}. Run a `codeward` command first."
 
     if not rows:
         return empty

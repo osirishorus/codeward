@@ -1006,11 +1006,16 @@ def cmd_test(args) -> int:
 
 def cmd_gain(args) -> int:
     from .hooks import HISTORY, _read_history, global_history_path
-    scope = "repo"
-    if getattr(args, "global_scope", False):
-        scope = "global"
+    # Default is global so users see aggregated savings across every repo
+    # they've used Codeward in, not just the cwd. --repo opts back into
+    # the per-repo view; --all combines both (deduped).
+    scope = "global"
+    if getattr(args, "repo_scope", False):
+        scope = "repo"
     elif getattr(args, "all_scope", False):
         scope = "all"
+    elif getattr(args, "global_scope", False):
+        scope = "global"
 
     if getattr(args, "json_output", False):
         if scope == "global":
@@ -2142,8 +2147,10 @@ def build_parser() -> argparse.ArgumentParser:
     rn = sub.add_parser("run"); rn.add_argument("--dry-run", action="store_true"); rn.add_argument("--tool"); rn.add_argument("--shell-command"); rn.add_argument("command", nargs=argparse.REMAINDER); rn.set_defaults(func=cmd_run)
     ia = sub.add_parser("init-agent"); ia.add_argument("--bin-dir", default=".codeward/bin"); ia.add_argument("--no-agents-md", dest="agents_md", action="store_false"); ia.add_argument("--force", action="store_true", help="Install shims even if RTK is active"); ia.set_defaults(func=cmd_init_agent, agents_md=True)
     gp = sub.add_parser("gain", parents=[common])
+    gp.add_argument("--repo", dest="repo_scope", action="store_true",
+                    help="Show only this repo's savings (default is global across all repos)")
     gp.add_argument("--global", dest="global_scope", action="store_true",
-                    help="Read ~/.codeward/history.jsonl instead of the per-repo file (across all repos)")
+                    help="Show aggregated savings across all repos (this is the default)")
     gp.add_argument("--all", dest="all_scope", action="store_true",
                     help="Aggregate per-repo + global history (deduplicated)")
     gp.set_defaults(func=cmd_gain)

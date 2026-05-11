@@ -128,7 +128,7 @@ Precision depends on the analyzer for the file. `--json` output annotates each r
 
 ### Operations & adapters
 
-- `codeward gain [--global\|--all]` — token savings history (per-repo + global), formatted like `rtk gain`
+- `codeward gain [--repo\|--all]` — token savings history (defaults to **global** across all repos; `--repo` for the current repo only), formatted like `rtk gain`
 - `codeward doctor` — environment / hook ordering / index health
 - `codeward index` / `codeward watch` — explicit / continuous indexing
 - `codeward init [--hook] [--global] [--gemini] [--no-hook-bash] [--no-hook-edit]` — vocabulary + optional hooks
