@@ -29,6 +29,12 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 - `codeward preflight <file>` — context an editor should see before changing a file
 - `PreToolUse` on `Edit|Write|MultiEdit` — auto-injects preflight via `additionalContext`
 
+### Git-history awareness (Phase E)
+- `codeward hotspots [--since 90d] [--top N]` — files ranked by churn × dependents
+- `codeward neighbors <file> [--since 90d]` — files that historically change together
+- `codeward pack` now includes top co-change neighbors as `relation: "co-change"`
+- `codeward impact` flags high-churn changed files as hotspots and bumps risk to HIGH
+
 ### Performance / tooling (Phase D + 0)
 - `codeward watch` — `watchdog`-based incremental SQLite re-indexer
 - `--json` on every read-only command (stable schema in `docs/JSON_SCHEMA.md`)

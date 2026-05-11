@@ -852,6 +852,21 @@ def cmd_tests_for(args) -> int:
 def cmd_impact(args) -> int:
     idx = RepoIndex(Path.cwd())
     files = selected_files(idx, args)
+    # Compute hotspot set from recent git churn so we can flag changed files
+    # that are also high-churn (where bugs tend to concentrate).
+    commits = _git_log_commits("90d", 2000)
+    churn: Counter[str] = Counter()
+    for paths in commits:
+        for p in paths:
+            if p in idx.files:
+                churn[p] += 1
+    if churn:
+        values = sorted(churn.values(), reverse=True)
+        pivot = values[len(values) // 10] if len(values) >= 10 else values[0]
+        threshold = max(3, pivot)
+        hotspot_set = {p for p, c in churn.items() if c >= threshold}
+    else:
+        hotspot_set = set()
     rows = []
     out = ["Impact analysis:"]
     if not files:
@@ -860,11 +875,24 @@ def cmd_impact(args) -> int:
         deps = idx.dependents_of_file(f) if f in idx.files else []
         tests = idx.tests_for(f)
         risk = "HIGH" if len(deps) > 3 or any(k in f.lower() for k in ["auth", "db", "session", "payment"]) else "MEDIUM" if deps else "LOW"
-        rows.append({"file": f, "dependents": deps, "tests": tests, "risk": risk})
+        is_hot = f in hotspot_set
+        if is_hot and risk != "HIGH":
+            risk = "HIGH"
+        commits_90d = churn.get(f, 0)
+        rows.append({
+            "file": f,
+            "dependents": deps,
+            "tests": tests,
+            "risk": risk,
+            "hotspot": is_hot,
+            "commits_90d": commits_90d,
+        })
         out.append(f"\nChanged: {f}")
         out += fmt_list("Direct dependents", deps)
         out += fmt_list("Likely affected tests", tests)
         out.append(f"Risk: {risk}")
+        if is_hot:
+            out.append(f"  (hotspot: yes — {commits_90d} commits in 90d)")
     if getattr(args, "json_output", False):
         print(json.dumps({"command": "impact", "files": rows}, indent=2))
     else:
@@ -1039,6 +1067,360 @@ def run_capture_for_savings(command_text: str, rewritten: bool) -> tuple[int, st
         out = (e.stdout or "") + (e.stderr or "")
         return 124, out + "\n[Codeward savings: command timed out]"
     return cp.returncode, (cp.stdout or "") + (cp.stderr or "")
+
+
+def _git_log_commits(since: str = "90d", max_commits: int = 2000) -> list[list[str]]:
+    """Return a list of commits; each commit is a list of repo-relative paths
+    touched. Empty list on: non-git dir, missing git binary, timeout, or no
+    commits in the window.
+
+    Uses `--name-only -z --no-renames` plus a NUL-delimited commit sentinel
+    so unusual paths and commit messages can't break parsing.
+    """
+    try:
+        cp = subprocess.run(
+            [
+                "git", "log",
+                f"--since={since}",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                "--format=%x00COMMIT%x00",
+                "-n", str(max_commits),
+            ],
+            cwd=Path.cwd(),
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if cp.returncode != 0:
+        return []
+    commits: list[list[str]] = []
+    for chunk in cp.stdout.split("\x00COMMIT\x00"):
+        paths = [p.strip() for p in chunk.split("\x00") if p.strip()]
+        if paths:
+            commits.append(paths)
+    return commits
+
+
+def _file_raw_tokens(idx: RepoIndex, rel: str) -> int:
+    try:
+        return estimate_tokens(idx.text(rel))
+    except OSError:
+        return 0
+
+
+def _recommended_file_command(rel: str) -> str:
+    return "codeward read " + shlex.quote(rel)
+
+
+def cmd_budget(args) -> int:
+    """Estimate raw repo/file token cost and point agents at cheaper commands.
+
+    This is intentionally approximate (same 4 chars/token heuristic used by gain),
+    but good enough to stop agents from blindly dumping the most expensive files.
+    """
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    target = (getattr(args, "target", None) or "").replace("\\", "/").strip("/")
+    top_n = max(1, int(getattr(args, "top", 10) or 10))
+    candidates = list(idx.code_files)
+    if target:
+        if target in idx.files:
+            candidates = [target]
+        else:
+            prefix = target.rstrip("/") + "/"
+            candidates = [p for p in candidates if p == target or p.startswith(prefix)]
+    rows = []
+    total_raw = 0
+    for rel in candidates:
+        if rel not in idx.files:
+            continue
+        tokens = _file_raw_tokens(idx, rel)
+        total_raw += tokens
+        info = idx.files[rel]
+        rows.append({
+            "path": rel,
+            "language": info.lang,
+            "lines": info.lines,
+            "raw_tokens": tokens,
+            "symbols": len(info.symbols),
+            "dependents": len(idx.dependents_of_file(rel)),
+            "tests": len(idx.tests_for(rel)),
+            "recommended_command": _recommended_file_command(rel),
+        })
+    rows.sort(key=lambda r: (r["raw_tokens"], r["dependents"], r["symbols"]), reverse=True)
+    shown = rows[:top_n]
+    payload = {
+        "command": "budget",
+        "target": target or ".",
+        "estimated_raw_code_tokens": total_raw,
+        "files_analyzed": len(rows),
+        "files": shown,
+        "tips": [
+            "Use codeward read <file> before raw cat/head/tail.",
+            "Use codeward pack <target> for a budgeted multi-file context bundle.",
+            "Use codeward slice <symbol> when only one function/class matters.",
+        ],
+    }
+    lines = [
+        "# Codeward token budget",
+        f"Target: {target or '.'}",
+        f"Files analyzed: {len(rows)}",
+        f"Estimated raw code tokens: {total_raw}",
+        "",
+        f"Top {len(shown)} token hotspots:",
+    ]
+    for row in shown:
+        lines.append(f"- {row['path']} — ~{row['raw_tokens']} tokens, {row['lines']} lines, {row['symbols']} symbols")
+        lines.append(f"  cheaper: {row['recommended_command']}")
+        if row["tests"]:
+            lines.append(f"  tests: codeward tests-for {shlex.quote(row['path'])}")
+        if row["dependents"]:
+            lines.append(f"  impact: codeward impact {shlex.quote(row['path'])}")
+    lines.append("")
+    lines += [f"Tip: {tip}" for tip in payload["tips"]]
+    emit_tracked(lines, "budget", raw_token_estimate=total_raw, payload=payload, json_mode=json_mode)
+    return 0
+
+
+def _pack_target_files(idx: RepoIndex, target: str) -> list[str]:
+    target = target.replace("\\", "/").strip("/")
+    if target in idx.files:
+        return [target]
+    prefix = target.rstrip("/") + "/"
+    dir_matches = sorted(p for p in idx.code_files if p.startswith(prefix))
+    if dir_matches:
+        return dir_matches[:12]
+    syms = idx.find_symbol(target)
+    if syms:
+        return sorted({s.file for s in syms})
+    hits = idx.search(target, include_tests=False)
+    return sorted({p for p, _, _ in hits})[:12]
+
+
+def _pack_file_row(idx: RepoIndex, rel: str, relation: str, top_symbols: int) -> dict:
+    info = idx.files[rel]
+    symbols = [s.signature or f"{s.kind} {s.name}" for s in info.symbols[:top_symbols]]
+    return {
+        "path": rel,
+        "relation": relation,
+        "language": info.lang,
+        "lines": info.lines,
+        "raw_tokens": _file_raw_tokens(idx, rel),
+        "symbols": symbols,
+        "side_effects": list(info.side_effects),
+        "dependents": idx.dependents_of_file(rel),
+        "tests": idx.tests_for(rel),
+    }
+
+
+def _render_pack_lines(target: str, rows: list[dict], max_tokens: int) -> list[str]:
+    lines = ["# Codeward context pack", f"Target: {target}", f"Budget: ~{max_tokens} tokens", "", "Included files:"]
+    for row in rows:
+        lines.append(f"- {row['path']} ({row['relation']}) — {row['language']}, {row['lines']} lines, raw~{row['raw_tokens']} tokens")
+        if row["symbols"]:
+            lines.append("  symbols: " + "; ".join(row["symbols"][:6]))
+        if row["side_effects"]:
+            lines.append("  side effects: " + ", ".join(row["side_effects"][:4]))
+        if row["tests"]:
+            lines.append("  likely tests: " + ", ".join(row["tests"][:4]))
+        if row["dependents"]:
+            lines.append("  direct dependents: " + ", ".join(row["dependents"][:4]))
+    lines.append("")
+    lines.append("Next commands:")
+    lines.append(f"- codeward budget {shlex.quote(target)}")
+    for row in rows[:3]:
+        lines.append(f"- codeward read {shlex.quote(row['path'])}")
+    lines.append(f"Estimated pack tokens: {estimate_tokens(chr(10).join(lines))}")
+    return lines
+
+
+def cmd_pack(args) -> int:
+    """Build a compact context bundle for a file, directory, symbol, or search query.
+
+    It includes semantic summaries only, never full bodies, and stops before the
+    requested approximate budget when possible.
+    """
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    target = args.target.replace("\\", "/")
+    max_tokens = max(80, int(getattr(args, "max_tokens", 800) or 800))
+    top_symbols = max(1, int(getattr(args, "top_symbols", 6) or 6))
+    targets = _pack_target_files(idx, target)
+    if not targets:
+        msg = f"No indexed files, symbols, or search hits matched: {target}"
+        if json_mode:
+            print(json.dumps({"command": "pack", "target": target, "error": msg}, indent=2))
+        else:
+            print(msg, file=sys.stderr)
+        return 2
+
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    def add(rel: str, relation: str) -> None:
+        if rel in idx.files and rel not in seen:
+            seen.add(rel)
+            ordered.append((rel, relation))
+
+    for rel in targets:
+        add(rel, "target")
+    for rel in targets:
+        for tf in idx.tests_for(rel):
+            add(tf, "likely-test")
+    for rel in targets:
+        for dep in idx.dependents_of_file(rel):
+            add(dep, "dependent")
+    # Co-change neighbors — files that historically move together with the
+    # target(s). Guarded so a git stall or non-repo never breaks pack.
+    try:
+        nb_commits = _git_log_commits("90d", 2000)
+        co: Counter[str] = Counter()
+        target_set = set(targets)
+        for paths in nb_commits:
+            if not target_set.intersection(paths):
+                continue
+            for p in paths:
+                if p in idx.files and p not in target_set:
+                    co[p] += 1
+        for rel, _ in co.most_common(3):
+            add(rel, "co-change")
+    except Exception:
+        pass
+    # Search hits supply nearby context when target is a free-text query.
+    for rel, _, _ in idx.search(target, include_tests=False)[:12]:
+        add(rel, "search-hit")
+
+    included: list[dict] = []
+    for rel, relation in ordered:
+        row = _pack_file_row(idx, rel, relation, top_symbols)
+        trial = included + [row]
+        trial_lines = _render_pack_lines(target, trial, max_tokens)
+        if included and estimate_tokens("\n".join(trial_lines)) > max_tokens:
+            continue
+        included = trial
+    lines = _render_pack_lines(target, included, max_tokens)
+    payload = {
+        "command": "pack",
+        "target": target,
+        "max_tokens": max_tokens,
+        "estimated_pack_tokens": estimate_tokens("\n".join(lines)),
+        "included_files": [r["path"] for r in included],
+        "files": included,
+    }
+    raw_estimate = sum(r["raw_tokens"] for r in included)
+    emit_tracked(lines, "pack", raw_token_estimate=raw_estimate, payload=payload, json_mode=json_mode)
+    return 0
+
+
+def cmd_hotspots(args) -> int:
+    """Rank files by risk = churn (recent commits) x (1 + dependents).
+
+    Surfaces the files most likely to break under a nearby edit, blending git
+    history with the static dependency graph the index already maintains.
+    """
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    since = getattr(args, "since", "90d") or "90d"
+    top_n = max(1, int(getattr(args, "top", 10) or 10))
+    max_commits = max(1, int(getattr(args, "max_commits", 2000) or 2000))
+    commits = _git_log_commits(since, max_commits)
+    churn: Counter[str] = Counter()
+    for paths in commits:
+        for p in paths:
+            if p in idx.files:
+                churn[p] += 1
+    rows: list[dict] = []
+    for path, n in churn.most_common():
+        deps = len(idx.dependents_of_file(path))
+        score = n * (1 + deps)
+        rows.append({
+            "path": path,
+            "commits": n,
+            "dependents": deps,
+            "risk_score": score,
+            "rationale": f"{n} commits in {since} x {deps} dependents = {score}",
+        })
+    rows.sort(key=lambda r: (r["risk_score"], r["commits"], r["dependents"]), reverse=True)
+    shown = rows[:top_n]
+    payload = {
+        "command": "hotspots",
+        "since": since,
+        "top": top_n,
+        "files_analyzed": len(rows),
+        "files": shown,
+    }
+    lines = [
+        "# Codeward hotspots",
+        f"Window: {since}",
+        f"Files with churn: {len(rows)}",
+    ]
+    if not rows:
+        lines.append("No git history in window (or not a git repo).")
+    else:
+        lines.append("")
+        lines.append(f"Top {len(shown)} risk files:")
+        for row in shown:
+            lines.append(
+                f"- {row['path']} — {row['commits']} commits, {row['dependents']} dependents, score {row['risk_score']}"
+            )
+            lines.append(f"  {row['rationale']}")
+    emit_tracked(lines, "hotspots", raw_token_estimate=None, payload=payload, json_mode=json_mode)
+    return 0
+
+
+def cmd_neighbors(args) -> int:
+    """Files that historically change together with <file>.
+
+    Aggregates co-occurrences from `git log` commits that touched the target
+    file. Useful for `pack` and for agents to know which adjacent files
+    usually need to move together with an edit.
+    """
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    target = args.file.replace("\\", "/").strip("/")
+    since = getattr(args, "since", "90d") or "90d"
+    top_n = max(1, int(getattr(args, "top", 10) or 10))
+    max_commits = max(1, int(getattr(args, "max_commits", 2000) or 2000))
+    if target not in idx.files:
+        msg = f"Not indexed: {target}"
+        if json_mode:
+            print(json.dumps({"command": "neighbors", "file": target, "error": msg}, indent=2))
+        else:
+            print(msg, file=sys.stderr)
+        return 2
+    commits = _git_log_commits(since, max_commits)
+    co: Counter[str] = Counter()
+    for paths in commits:
+        if target not in paths:
+            continue
+        for p in paths:
+            if p != target and p in idx.files:
+                co[p] += 1
+    neighbors = [{"path": p, "co_changes": c} for p, c in co.most_common(top_n)]
+    payload = {
+        "command": "neighbors",
+        "file": target,
+        "since": since,
+        "top": top_n,
+        "neighbors": neighbors,
+    }
+    lines = [
+        "# Codeward co-change neighbors",
+        f"Target: {target}",
+        f"Window: {since}",
+    ]
+    if not neighbors:
+        lines.append("No co-change neighbors found (or not a git repo).")
+    else:
+        lines.append("")
+        lines.append(f"Top {len(neighbors)} neighbors:")
+        for row in neighbors:
+            lines.append(f"- {row['path']} — {row['co_changes']} co-changes")
+    emit_tracked(lines, "neighbors", raw_token_estimate=None, payload=payload, json_mode=json_mode)
+    return 0
 
 
 def cmd_savings(args) -> int:
@@ -1765,6 +2147,19 @@ def build_parser() -> argparse.ArgumentParser:
     gp.add_argument("--all", dest="all_scope", action="store_true",
                     help="Aggregate per-repo + global history (deduplicated)")
     gp.set_defaults(func=cmd_gain)
+    bd = sub.add_parser("budget", parents=[common]); bd.add_argument("target", nargs="?"); bd.add_argument("--top", type=int, default=10); bd.set_defaults(func=cmd_budget)
+    pk = sub.add_parser("pack", parents=[common]); pk.add_argument("target"); pk.add_argument("--max-tokens", type=int, default=800); pk.add_argument("--top-symbols", type=int, default=6); pk.set_defaults(func=cmd_pack)
+    hs = sub.add_parser("hotspots", parents=[common], help="Rank files by risk = recent churn x dependents")
+    hs.add_argument("--since", default="90d", help="Git log window, e.g. 30d, 6.months, 2024-01-01 (default: 90d)")
+    hs.add_argument("--top", type=int, default=10, help="Number of files to return (default: 10)")
+    hs.add_argument("--max-commits", type=int, default=2000, help="Hard cap on commits scanned (default: 2000)")
+    hs.set_defaults(func=cmd_hotspots)
+    nb = sub.add_parser("neighbors", parents=[common], help="Files that historically change together with <file>")
+    nb.add_argument("file")
+    nb.add_argument("--since", default="90d", help="Git log window (default: 90d)")
+    nb.add_argument("--top", type=int, default=10, help="Number of neighbors to return (default: 10)")
+    nb.add_argument("--max-commits", type=int, default=2000, help="Hard cap on commits scanned (default: 2000)")
+    nb.set_defaults(func=cmd_neighbors)
     sv = sub.add_parser("savings"); sv.add_argument("--command", action="append"); sv.add_argument("--no-history", action="store_true"); sv.set_defaults(func=cmd_savings)
     co = sub.add_parser("coach"); co.add_argument("command", nargs=argparse.REMAINDER); co.set_defaults(func=cmd_coach)
     hk = sub.add_parser("hook"); hk.add_argument("--agent", choices=["claude", "cursor", "gemini", "generic"], default="claude"); hk.set_defaults(func=cmd_hook)

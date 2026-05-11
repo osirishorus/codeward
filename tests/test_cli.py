@@ -1370,3 +1370,171 @@ def test_read_flow_dumps_compact_method_bodies(sample_repo):
     assert "Flow (compact method bodies):" in result.stdout
     # Body of create_user should appear in the slice
     assert "db.users.create" in result.stdout, result.stdout
+
+
+def test_budget_reports_token_hotspots_and_alternatives(sample_repo):
+    """`budget` should show token-heavy files and cheaper semantic reads."""
+    big = sample_repo / "src" / "services" / "big_service.py"
+    big.write_text("\n".join(["def noisy_function():", "    return 'x'"] + [f"# padding {i}" for i in range(800)]))
+
+    result = run_cli(["budget", "--top", "2"], sample_repo)
+
+    assert result.returncode == 0
+    assert "Codeward token budget" in result.stdout
+    assert "Estimated raw code tokens" in result.stdout
+    assert "src/services/big_service.py" in result.stdout
+    assert "codeward read src/services/big_service.py" in result.stdout
+
+    payload = json.loads(run_cli(["budget", "--json", "--top", "1"], sample_repo).stdout)
+    assert payload["command"] == "budget"
+    assert payload["files"][0]["path"] == "src/services/big_service.py"
+    assert payload["files"][0]["recommended_command"] == "codeward read src/services/big_service.py"
+
+
+def test_pack_builds_budgeted_context_bundle(sample_repo):
+    """`pack` should produce a compact context bundle without dumping bodies."""
+    result = run_cli(["pack", "src/services/user_service.py", "--max-tokens", "220"], sample_repo)
+
+    assert result.returncode == 0
+    assert "Codeward context pack" in result.stdout
+    assert "Target: src/services/user_service.py" in result.stdout
+    assert "src/services/user_service.py" in result.stdout
+    assert "src/controllers/user_controller.py" in result.stdout
+    assert "tests/test_user_service.py" in result.stdout
+    assert "Estimated pack tokens" in result.stdout
+
+    payload = json.loads(run_cli(["pack", "--json", "src/services/user_service.py", "--max-tokens", "220"], sample_repo).stdout)
+    assert payload["command"] == "pack"
+    assert payload["target"] == "src/services/user_service.py"
+    assert "src/services/user_service.py" in payload["included_files"]
+
+
+def _commit_change(repo: Path, rel: str, content: str, msg: str) -> None:
+    (repo / rel).write_text(content)
+    subprocess.run(["git", "add", rel], cwd=repo, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", msg], cwd=repo, capture_output=True, text=True)
+
+
+def test_hotspots_ranks_files_by_churn_and_dependents(sample_repo):
+    """`hotspots` should surface frequently-changed files with many dependents."""
+    base = '''
+from src.db import db
+from src.emailer import send_welcome_email
+
+class UserService:
+    def create_user(self, email: str) -> dict:
+        user = db.users.create({"email": email})
+        send_welcome_email(email)
+        return user
+
+    def delete_user(self, user_id: str) -> None:
+        db.users.delete(user_id)
+'''
+    for i in range(3):
+        _commit_change(
+            sample_repo,
+            "src/services/user_service.py",
+            base + f"\n# churn revision {i}\n",
+            f"churn {i}",
+        )
+
+    result = run_cli(["hotspots", "--top", "3"], sample_repo)
+    assert result.returncode == 0
+    assert "Codeward hotspots" in result.stdout
+    assert "src/services/user_service.py" in result.stdout
+
+    payload = json.loads(run_cli(["hotspots", "--json", "--top", "3"], sample_repo).stdout)
+    assert payload["command"] == "hotspots"
+    assert payload["files"]
+    top = payload["files"][0]
+    assert top["path"] == "src/services/user_service.py"
+    assert top["commits"] >= 3
+    assert top["dependents"] >= 1
+    assert top["risk_score"] == top["commits"] * (1 + top["dependents"])
+
+
+def test_hotspots_empty_in_non_git_dir(tmp_path):
+    """`hotspots` should degrade gracefully in a non-git directory."""
+    (tmp_path / "a.py").write_text("x = 1\n")
+    result = run_cli(["hotspots", "--json"], tmp_path)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "hotspots"
+    assert payload["files"] == []
+
+
+def test_neighbors_finds_co_changing_files(sample_repo):
+    """`neighbors` should surface files that historically change together."""
+    service_text = (sample_repo / "src/services/user_service.py").read_text()
+    controller_text = (sample_repo / "src/controllers/user_controller.py").read_text()
+    for i in range(2):
+        (sample_repo / "src/services/user_service.py").write_text(service_text + f"\n# co {i}\n")
+        (sample_repo / "src/controllers/user_controller.py").write_text(controller_text + f"\n# co {i}\n")
+        subprocess.run(
+            ["git", "commit", "-am", f"co {i}"],
+            cwd=sample_repo, capture_output=True, text=True,
+        )
+
+    payload = json.loads(
+        run_cli(["neighbors", "--json", "src/services/user_service.py"], sample_repo).stdout
+    )
+    assert payload["command"] == "neighbors"
+    assert payload["file"] == "src/services/user_service.py"
+    paths = [n["path"] for n in payload["neighbors"]]
+    assert "src/controllers/user_controller.py" in paths
+
+
+def test_neighbors_unknown_file_returns_2(sample_repo):
+    """`neighbors` should exit 2 when the target is not in the index."""
+    result = run_cli(["neighbors", "src/missing.py"], sample_repo)
+    assert result.returncode == 2
+    assert "Not indexed" in result.stderr
+
+
+def test_pack_includes_co_change_neighbors(sample_repo):
+    """`pack` should pick up co-change neighbors after direct dependents."""
+    service_text = (sample_repo / "src/services/user_service.py").read_text()
+    emailer_text = (sample_repo / "src/emailer.py").read_text()
+    # Co-edit user_service.py with emailer.py — emailer is not a dependent of
+    # user_service (the import goes the other way), so it can only appear via
+    # the co-change path.
+    for i in range(3):
+        (sample_repo / "src/services/user_service.py").write_text(service_text + f"\n# co {i}\n")
+        (sample_repo / "src/emailer.py").write_text(emailer_text + f"\n# co {i}\n")
+        subprocess.run(
+            ["git", "commit", "-am", f"co {i}"],
+            cwd=sample_repo, capture_output=True, text=True,
+        )
+
+    payload = json.loads(
+        run_cli(
+            ["pack", "--json", "src/services/user_service.py", "--max-tokens", "2000"],
+            sample_repo,
+        ).stdout
+    )
+    relations = {f["path"]: f["relation"] for f in payload["files"]}
+    assert relations.get("src/emailer.py") == "co-change"
+
+
+def test_impact_flags_hotspot(sample_repo):
+    """`impact` should mark high-churn changed files as hotspots and bump risk."""
+    service_text = (sample_repo / "src/services/user_service.py").read_text()
+    for i in range(4):
+        _commit_change(
+            sample_repo,
+            "src/services/user_service.py",
+            service_text + f"\n# churn {i}\n",
+            f"churn {i}",
+        )
+    # Leave an uncommitted edit so --changed picks it up.
+    (sample_repo / "src/services/user_service.py").write_text(service_text + "\n# pending edit\n")
+
+    payload = json.loads(
+        run_cli(["impact", "--json", "--changed"], sample_repo).stdout
+    )
+    rows = {r["file"]: r for r in payload["files"]}
+    target = "src/services/user_service.py"
+    assert target in rows
+    assert rows[target]["hotspot"] is True
+    assert rows[target]["commits_90d"] >= 4
+    assert rows[target]["risk"] == "HIGH"

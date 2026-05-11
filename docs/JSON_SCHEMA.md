@@ -150,13 +150,15 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
       "file": "src/services/user_service.py",
       "dependents": ["src/controllers/user_controller.py"],
       "tests": ["tests/test_user_service.py"],
-      "risk": "MEDIUM"
+      "risk": "HIGH",
+      "hotspot": true,
+      "commits_90d": 7
     }
   ]
 }
 ```
 
-`risk` is one of `LOW`, `MEDIUM`, `HIGH`.
+`risk` is one of `LOW`, `MEDIUM`, `HIGH`. `hotspot` is `true` when the file is in the top decile of recent (90d) churn with a 3-commit floor; risk is bumped to `HIGH` for hotspots regardless of dependent count. `commits_90d` is the file's commit count in the last 90 days (0 in non-git directories).
 
 ## `codeward review --json [--changed | <target>] [--security]`
 
@@ -199,6 +201,96 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
   "rtk_active": true
 }
 ```
+
+## `codeward budget --json [target]`
+
+```json
+{
+  "command": "budget",
+  "target": ".",
+  "estimated_raw_code_tokens": 61236,
+  "files_analyzed": 8,
+  "files": [
+    {
+      "path": "src/codeward/cli.py",
+      "language": "Python",
+      "lines": 1993,
+      "raw_tokens": 23131,
+      "symbols": 59,
+      "dependents": 0,
+      "tests": 0,
+      "recommended_command": "codeward read src/codeward/cli.py"
+    }
+  ],
+  "tips": ["Use codeward read <file> before raw cat/head/tail."]
+}
+```
+
+## `codeward pack --json <target>`
+
+```json
+{
+  "command": "pack",
+  "target": "src/services/user_service.py",
+  "max_tokens": 800,
+  "estimated_pack_tokens": 180,
+  "included_files": ["src/services/user_service.py", "tests/test_user_service.py"],
+  "files": [
+    {
+      "path": "src/services/user_service.py",
+      "relation": "target",
+      "language": "Python",
+      "lines": 42,
+      "raw_tokens": 420,
+      "symbols": ["class UserService", "def create_user(self, email: str) -> dict"],
+      "side_effects": ["DB write"],
+      "dependents": ["src/controllers/user_controller.py"],
+      "tests": ["tests/test_user_service.py"]
+    }
+  ]
+}
+```
+
+`relation` is one of `target`, `likely-test`, `dependent`, `co-change`, `search-hit`. `co-change` rows come from git history (files that historically move together with the target); only the top 3 are included.
+
+## `codeward hotspots --json [--since 90d] [--top N]`
+
+```json
+{
+  "command": "hotspots",
+  "since": "90d",
+  "top": 10,
+  "files_analyzed": 24,
+  "files": [
+    {
+      "path": "src/codeward/cli.py",
+      "commits": 42,
+      "dependents": 7,
+      "risk_score": 336,
+      "rationale": "42 commits in 90d x 7 dependents = 336"
+    }
+  ]
+}
+```
+
+`risk_score = commits * (1 + dependents)`. Returns `{"files": []}` in non-git directories or when the window has no commits.
+
+## `codeward neighbors --json <file> [--since 90d] [--top N]`
+
+```json
+{
+  "command": "neighbors",
+  "file": "src/codeward/cli.py",
+  "since": "90d",
+  "top": 10,
+  "neighbors": [
+    {"path": "src/codeward/index.py", "co_changes": 14},
+    {"path": "tests/test_cli.py", "co_changes": 11}
+  ]
+}
+```
+
+Exit code is `2` when `<file>` is not in the index. Returns `{"neighbors": []}` when the file is indexed but the git history window contains no commits touching it.
 
 ## `codeward doctor --json`
 

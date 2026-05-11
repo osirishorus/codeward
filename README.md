@@ -109,6 +109,10 @@ All read-only commands support `--json`.
 | `codeward tests-for <target>` | Likely covering tests | guessing |
 | `codeward impact [--changed\|<target>]` | Dependents + tests + risk | manual review |
 | `codeward preflight <file>` | "What to know before editing this" — see [above](#preflight-blast-radius-context-before-edits) | n/a |
+| `codeward budget [target]` | Token hotspot audit + cheaper command recommendations | blind `cat`/`find` exploration |
+| `codeward pack <target>` | Budgeted context bundle for a file/dir/symbol/query | dumping many files into context |
+| `codeward hotspots [--since 90d]` | Files ranked by churn × dependents — where bugs concentrate | `git log` + `wc -l` + intuition |
+| `codeward neighbors <file>` | Files that historically change together with `<file>` | scanning `git log --name-only` by hand |
 
 ### Maturity varies by language
 
