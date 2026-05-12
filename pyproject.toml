@@ -51,6 +51,14 @@ dependencies = [
 # Backward-compatible alias: these packages are part of the default install in
 # v0.4+, so `codeward[full]` remains valid but adds nothing.
 full = []
+# MCP server: exposes Codeward's semantic queries as MCP tools so any
+# MCP-compatible agent (Claude Desktop, Cursor, Continue, Zed, Cline,
+# Goose, Windsurf, ChatGPT Desktop) can use them with a single config
+# entry — no per-tool hook wiring required.
+#
+# Install with: pip install 'codeward[mcp]'
+# Then: codeward mcp   (runs the server on stdio)
+mcp = ["mcp>=1.2"]
 
 [project.scripts]
 codeward = "codeward.cli:main"

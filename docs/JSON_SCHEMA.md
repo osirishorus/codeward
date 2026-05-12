@@ -4,6 +4,8 @@ Every read-only command supports `--json` for machine-parseable output. This doc
 
 Backwards compatibility: fields will only ever be **added**. Existing keys won't be removed or have their types changed without a major version bump.
 
+**MCP tools return the same shapes.** Each MCP tool (e.g. `codeward_map`, `codeward_read`) wraps the corresponding `codeward <cmd> --json` and returns its JSON payload directly. So the schemas below are the authoritative reference for both surfaces.
+
 ## Conventions
 
 - Top-level field `command` always echoes the subcommand name.

@@ -1478,6 +1478,18 @@ def cmd_index(args) -> int:
     return 0
 
 
+def cmd_mcp(args) -> int:
+    """Start the Codeward MCP server on stdio.
+
+    Exposes every read-only semantic command as an MCP tool so any
+    MCP-compatible client (Claude Desktop, Cursor, Continue, Zed, Cline,
+    Goose, Windsurf, ChatGPT Desktop) can use Codeward natively — no
+    bespoke hook config. Requires `pip install 'codeward[mcp]'`."""
+    from . import mcp_server
+    cwd = Path(args.cwd).resolve() if getattr(args, "cwd", None) else None
+    return mcp_server.run(cwd=cwd)
+
+
 def clean_shim_env() -> dict[str, str]:
     env = os.environ.copy()
     shim_dir = env.get("CODEWARD_SHIM_DIR")
@@ -2186,6 +2198,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
     doc = sub.add_parser("doctor", parents=[common])
     doc.set_defaults(func=cmd_doctor)
+    mp = sub.add_parser("mcp", help="Run the Codeward MCP server on stdio (needs `pip install codeward[mcp]`)")
+    mp.add_argument("--cwd", help="Pin the server to this directory instead of inheriting the launcher's cwd")
+    mp.set_defaults(func=cmd_mcp)
     return p
 
 

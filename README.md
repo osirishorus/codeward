@@ -134,6 +134,7 @@ Precision depends on the analyzer for the file. `--json` output annotates each r
 - `codeward init [--hook] [--global] [--gemini] [--no-hook-bash] [--no-hook-edit]` — vocabulary + optional hooks
 - `codeward init-agent [--force]` — PATH shims for Codex / Aider / shell agents (refuses if RTK detected)
 - `codeward hook --agent {claude,cursor,gemini,generic}` — agent hook adapter (stdin → stdout)
+- `codeward mcp [--cwd <path>]` — MCP server on stdio. One config entry exposes all read-only commands to any MCP client (Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop). Install with `pip install 'codeward[mcp]'`
 
 ### Deferred to RTK when present
 
@@ -165,6 +166,29 @@ codeward refs --json UserService | jq '.references | length'
 Schema: [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md). Rows include `analyzer`/`precision`/`confidence` — Python AST is high-confidence, tree-sitter is syntax-aware, regex fallbacks are explicitly heuristic.
 
 ## Agent integrations
+
+**MCP server (one setup for any MCP-compatible agent — Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop):**
+
+```bash
+pip install 'codeward[mcp]'                  # add the optional MCP dep
+```
+
+Add to your client's MCP config (Claude Desktop: `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows; Cursor/Continue/Zed use similar `mcpServers` blocks):
+
+```json
+{
+  "mcpServers": {
+    "codeward": {
+      "command": "codeward",
+      "args": ["mcp", "--cwd", "/path/to/your/repo"]
+    }
+  }
+}
+```
+
+All 19 read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_pack`, `codeward_impact`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
+
+**Native hooks (for the agents that have them):**
 
 | Agent | Native hook? | What `codeward init` gives you |
 |---|---|---|

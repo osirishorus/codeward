@@ -35,6 +35,10 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 - `codeward pack` now includes top co-change neighbors as `relation: "co-change"`
 - `codeward impact` flags high-churn changed files as hotspots and bumps risk to HIGH
 
+### MCP server (Phase F)
+- `codeward mcp [--cwd <path>]` — stdio MCP server exposing 19 read-only Codeward commands as MCP tools. One config entry works for any MCP-compatible agent (Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop) — no per-tool hook wiring required.
+- Optional dep: `pip install 'codeward[mcp]'`.
+
 ### Performance / tooling (Phase D + 0)
 - `codeward watch` — `watchdog`-based incremental SQLite re-indexer
 - `--json` on every read-only command (stable schema in `docs/JSON_SCHEMA.md`)
@@ -51,7 +55,6 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 ## Forward direction
 
 ### Likely next (high leverage, no RTK overlap)
-- **MCP server** — single integration point for Cursor / Continue / Zed / Cline / Goose / Claude Desktop. Codeward's commands as MCP tools.
 - **Symbol-aware diff in PR comments** — GitHub Action wrapping `codeward sdiff` and `review --security`.
 - **Incremental tree-sitter parses** in watch mode (currently full-file reanalyze on each event).
 
