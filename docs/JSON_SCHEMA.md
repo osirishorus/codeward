@@ -142,6 +142,25 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
 }
 ```
 
+## `codeward preflight --json <file>`
+
+```json
+{
+  "command": "preflight",
+  "file": "src/services/user_service.py",
+  "language": "Python",
+  "lines": 42,
+  "symbols": 3,
+  "dependents": ["src/controllers/user_controller.py"],
+  "tests": ["tests/test_user_service.py"],
+  "blast_radius": "HIGH",
+  "hotspot": true,
+  "commits_90d": 7,
+  "neighbors": [{"path": "src/controllers/user_controller.py", "co_changes": 3}],
+  "recommended_checks": ["pytest tests/test_user_service.py", "inspect dependents and changed callers"]
+}
+```
+
 ## `codeward impact --json [--changed | <target>]`
 
 ```json
@@ -174,13 +193,20 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
       "precision": "exact_range",
       "confidence": "high",
       "symbols": [{"name": "UserService", "kind": "class", "analyzer": "python_ast", "precision": "exact_range", "confidence": "high"}],
+      "changed_symbols": [{"name": "UserService.create_user", "change": "signature"}],
       "risks": ["DB write"],
       "security_findings": [],
-      "tests": ["tests/test_user_service.py"]
+      "tests": ["tests/test_user_service.py"],
+      "hotspot": true,
+      "commits_90d": 7,
+      "semantic_risk_summary": "1 changed symbols; side effects: DB write; hotspot (7 commits/90d)"
     }
   ],
   "security_findings": [],
-  "suggested_command": "pytest tests/test_user_service.py"
+  "suggested_command": "pytest tests/test_user_service.py",
+  "semantic_risk_summary": [
+    {"file": "src/services/user_service.py", "summary": "1 changed symbols; side effects: DB write; hotspot (7 commits/90d)"}
+  ]
 }
 ```
 
@@ -257,6 +283,35 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
 ```
 
 `relation` is one of `target`, `likely-test`, `dependent`, `co-change`, `search-hit`. `co-change` rows come from git history (files that historically move together with the target); only the top 3 are included.
+
+## `codeward diff-pack --json [--changed] [--base <ref>]`
+
+```json
+{
+  "command": "diff-pack",
+  "base": "HEAD",
+  "changed": true,
+  "max_tokens": 800,
+  "top_symbols": 6,
+  "security": false,
+  "estimated_pack_tokens": 220,
+  "included_files": ["src/services/user_service.py"],
+  "files": [
+    {
+      "path": "src/services/user_service.py",
+      "risk": "HIGH",
+      "hotspot": true,
+      "commits_90d": 7,
+      "changed_symbols": [{"name": "branch_helper", "change": "added"}],
+      "likely_tests": ["tests/test_user_service.py"],
+      "dependents": ["src/controllers/user_controller.py"],
+      "neighbors": [{"path": "src/controllers/user_controller.py", "co_changes": 3}],
+      "side_effects": ["DB write"],
+      "security_findings": []
+    }
+  ]
+}
+```
 
 ## `codeward hotspots --json [--since 90d] [--top N]`
 

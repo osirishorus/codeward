@@ -111,6 +111,7 @@ All read-only commands support `--json`.
 | `codeward preflight <file>` | "What to know before editing this" — see [above](#preflight-blast-radius-context-before-edits) | n/a |
 | `codeward budget [target]` | Token hotspot audit + cheaper command recommendations | blind `cat`/`find` exploration |
 | `codeward pack <target>` | Budgeted context bundle for a file/dir/symbol/query | dumping many files into context |
+| `codeward diff-pack [--changed] [--base <ref>]` | Budgeted changed-code bundle for branch understanding/review | raw diff spelunking |
 | `codeward hotspots [--since 90d]` | Files ranked by churn × dependents — where bugs concentrate | `git log` + `wc -l` + intuition |
 | `codeward neighbors <file>` | Files that historically change together with `<file>` | scanning `git log --name-only` by hand |
 
@@ -186,7 +187,7 @@ Add to your client's MCP config (Claude Desktop: `~/Library/Application Support/
 }
 ```
 
-All 19 read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_pack`, `codeward_impact`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
+All 20 read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_pack`, `codeward_diff_pack`, `codeward_impact`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
 
 **Native hooks (for the agents that have them):**
 

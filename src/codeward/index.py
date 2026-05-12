@@ -394,17 +394,34 @@ class RepoIndex:
 
     def tests_for(self, target: str) -> list[str]:
         target = target.replace("\\", "/")
-        base = Path(target).stem.replace("test_", "")
+        path = Path(target)
+        base = path.stem.replace("test_", "")
         base_stem = (base or "").lower().replace("_", "")
+        module_parts = [p.lower().replace("_", "") for p in path.with_suffix("").parts if p not in {"src", "lib"}]
+        normalized_module = "/".join(module_parts)
         # Tests that resolve-import the target file via the precomputed graph (fast).
         importers = {f for f in self._inverse_deps.get(target, set()) if self.is_test_file(f)}
-        # Plus tests whose filename stem contains the target's stem (with separators normalized).
+        # Prefer exact repo-local naming relationships before falling back to
+        # fuzzy stem containment. This catches `cli.py -> test_cli.py` and
+        # `src/services/user_service.py -> tests/test_user_service.py`.
         out = set(importers)
-        if base_stem and len(base_stem) >= 4:
-            for tf in self.test_files:
-                tf_stem = Path(tf).stem.lower().replace("_", "")
-                if base_stem in tf_stem:
-                    out.add(tf)
+        for tf in self.test_files:
+            tf_path = Path(tf)
+            tf_stem = tf_path.stem.lower().replace("_", "")
+            test_base = tf_stem[4:] if tf_stem.startswith("test") else tf_stem
+            normalized_test_path = "/".join(
+                p.lower().replace("_", "")
+                for p in tf_path.with_suffix("").parts
+                if p not in {"tests", "test", "spec"}
+            )
+            if base_stem and test_base == base_stem:
+                out.add(tf)
+                continue
+            if normalized_module and normalized_module in normalized_test_path:
+                out.add(tf)
+                continue
+            if base_stem and len(base_stem) >= 4 and base_stem in tf_stem:
+                out.add(tf)
         return sorted(out)
 
     def search(self, query: str, include_tests: bool = False) -> list[tuple[str, int, str]]:

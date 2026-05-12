@@ -17,6 +17,7 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 - `codeward tests-for <target>` — likely covering tests
 - `codeward impact [--changed | <target>]` — dependents + tests + risk for changed files
 - `codeward review [--changed] [--security]` — pre-commit semantic review
+- `codeward diff-pack [--changed] [--base <ref>]` — compact changed-code bundle for agent planning/review
 
 ### Symbol-level commands (Phase B)
 - `codeward slice <Class.method>` — exact bytes when AST/tree-sitter line ranges exist; replaces `sed -n 'X,Yp'`
@@ -55,7 +56,7 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 ## Forward direction
 
 ### Likely next (high leverage, no RTK overlap)
-- **Symbol-aware diff in PR comments** — GitHub Action wrapping `codeward sdiff` and `review --security`.
+- **Symbol-aware diff in PR comments** — GitHub Action wrapping `codeward sdiff`, `review --security`, and `diff-pack`.
 - **Incremental tree-sitter parses** in watch mode (currently full-file reanalyze on each event).
 
 ### Maybe (waiting on usage signal)

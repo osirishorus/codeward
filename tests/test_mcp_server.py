@@ -60,7 +60,7 @@ def test_create_server_registers_expected_tools():
         "codeward_review", "codeward_slice", "codeward_refs", "codeward_blame",
         "codeward_sdiff", "codeward_api", "codeward_preflight",
         "codeward_hotspots", "codeward_neighbors", "codeward_pack",
-        "codeward_budget", "codeward_doctor",
+        "codeward_budget", "codeward_doctor", "codeward_diff_pack",
     }
     missing = expected - names
     assert not missing, f"Missing MCP tools: {missing}"

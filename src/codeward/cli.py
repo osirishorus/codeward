@@ -156,12 +156,30 @@ def cmd_preflight(args) -> int:
     deps = idx.dependents_of_file(rel)
     tests = idx.tests_for(rel)
     sec = extract_security_findings(idx.text(rel), info.lang)
+    churn, hotspot_set = _recent_churn_and_hotspots(idx)
+    commits_90d = churn.get(rel, 0)
+    hotspot = rel in hotspot_set
+    neighbors = _cochange_neighbors(idx, rel, top=3)
     blast = "HIGH" if len(deps) > 5 or any(k in rel.lower() for k in ["auth", "db", "session", "payment", "billing"]) else "MEDIUM" if deps else "LOW"
+    if hotspot and blast != "HIGH":
+        blast = "HIGH"
+    recommended_checks = []
+    if tests:
+        pytests = [t for t in tests if t.endswith(".py")]
+        recommended_checks.append("pytest " + " ".join(pytests[:3]) if pytests else "run likely related tests")
+    if sec:
+        recommended_checks.append("review security flags before editing")
+    if blast == "HIGH":
+        recommended_checks.append("inspect dependents and changed callers")
+    if not recommended_checks:
+        recommended_checks.append("run targeted project tests after editing")
     payload = {
         "command": "preflight", "file": rel, "language": info.lang, "lines": info.lines,
         "analyzer": info.analyzer, "precision": info.precision, "confidence": info.confidence,
         "symbols": len(info.symbols), "dependents": deps, "tests": tests,
         "side_effects": info.side_effects, "security_findings": sec, "blast_radius": blast,
+        "hotspot": hotspot, "commits_90d": commits_90d, "neighbors": neighbors,
+        "recommended_checks": recommended_checks,
     }
     out = [
         f"# Codeward preflight: {rel}",
@@ -175,6 +193,11 @@ def cmd_preflight(args) -> int:
         out.append(f"  side effects: {', '.join(info.side_effects)}")
     if sec:
         out.append(f"  security flags: {', '.join(sec)}")
+    if hotspot:
+        out.append(f"  hotspot: yes ({commits_90d} commits in 90d)")
+    if neighbors:
+        out.append(f"  co-change neighbors: {', '.join(n['path'] for n in neighbors)}")
+    out.append(f"  recommended next checks: {'; '.join(recommended_checks[:2])}")
     if json_mode:
         print(json.dumps(payload, indent=2, default=str))
     else:
@@ -246,50 +269,17 @@ def cmd_sdiff(args) -> int:
     """Semantic diff: list symbols added / removed / signature-changed between
     HEAD and a base ref. Replaces `git diff <base>` for symbol-level review.
     Use --base HEAD~1 for the last commit, or omit for unstaged working tree."""
-    from .index import analyze_file
     json_mode = getattr(args, "json_output", False)
     base = getattr(args, "base", None) or "HEAD"
     idx = RepoIndex(Path.cwd())
-    # Changed files (working tree) or files between base..HEAD
-    cp = subprocess.run(["git", "diff", "--name-only", base], cwd=Path.cwd(), text=True, capture_output=True)
-    files = [f.strip() for f in cp.stdout.splitlines() if f.strip()]
+    file_rows = _semantic_diff_rows(idx, base)
+    files = [row["file"] for row in file_rows]
     if not files:
         if json_mode:
             print(json.dumps({"command": "sdiff", "base": base, "files": []}, indent=2))
         else:
             print(f"No symbol-level changes vs {base}")
         return 0
-    file_rows: list[dict] = []
-    for f in files:
-        if f not in idx.files:
-            continue
-        cur_info = idx.files[f]
-        cur_sig = {s.name: (s.kind, s.signature or "") for s in cur_info.symbols}
-        # Try to read base version of file via git show
-        base_cp = subprocess.run(
-            ["git", "show", f"{base}:{f}"], cwd=Path.cwd(), text=True, capture_output=True,
-        )
-        if base_cp.returncode != 0:
-            # File didn't exist in base — treat all current symbols as added
-            added = [{"name": n, "signature": s[1]} for n, s in cur_sig.items()]
-            file_rows.append({"file": f, "status": "new", "added": added, "removed": [], "changed": []})
-            continue
-        try:
-            base_info = analyze_file(f, base_cp.stdout)
-        except Exception:
-            base_info = None
-        if not base_info:
-            file_rows.append({"file": f, "status": "modified", "added": [], "removed": [], "changed": []})
-            continue
-        base_sig = {s.name: (s.kind, s.signature or "") for s in base_info.symbols}
-        added = [{"name": n, "signature": cur_sig[n][1]} for n in cur_sig if n not in base_sig]
-        removed = [{"name": n, "signature": base_sig[n][1]} for n in base_sig if n not in cur_sig]
-        changed = [
-            {"name": n, "before": base_sig[n][1], "after": cur_sig[n][1]}
-            for n in cur_sig if n in base_sig and cur_sig[n][1] != base_sig[n][1]
-        ]
-        if added or removed or changed:
-            file_rows.append({"file": f, "status": "modified", "added": added, "removed": removed, "changed": changed})
     payload = {"command": "sdiff", "base": base, "files": file_rows}
     out = [f"# Codeward semantic diff vs {base}"]
     for r in file_rows:
@@ -852,21 +842,7 @@ def cmd_tests_for(args) -> int:
 def cmd_impact(args) -> int:
     idx = RepoIndex(Path.cwd())
     files = selected_files(idx, args)
-    # Compute hotspot set from recent git churn so we can flag changed files
-    # that are also high-churn (where bugs tend to concentrate).
-    commits = _git_log_commits("90d", 2000)
-    churn: Counter[str] = Counter()
-    for paths in commits:
-        for p in paths:
-            if p in idx.files:
-                churn[p] += 1
-    if churn:
-        values = sorted(churn.values(), reverse=True)
-        pivot = values[len(values) // 10] if len(values) >= 10 else values[0]
-        threshold = max(3, pivot)
-        hotspot_set = {p for p, c in churn.items() if c >= threshold}
-    else:
-        hotspot_set = set()
+    churn, hotspot_set = _recent_churn_and_hotspots(idx)
     rows = []
     out = ["Impact analysis:"]
     if not files:
@@ -903,6 +879,9 @@ def cmd_impact(args) -> int:
 def cmd_review(args) -> int:
     idx = RepoIndex(Path.cwd())
     files = selected_files(idx, args)
+    base = getattr(args, "base", None) or "HEAD"
+    changed_by_file = {row["file"]: row for row in _semantic_diff_rows(idx, base)}
+    churn, hotspot_set = _recent_churn_and_hotspots(idx)
     rows = []
     out = ["Review summary:"]
     if not files:
@@ -918,8 +897,19 @@ def cmd_review(args) -> int:
             row["precision"] = info.precision
             row["confidence"] = info.confidence
             row["symbols"] = [{"name": s.name, "kind": s.kind, "analyzer": s.analyzer, "precision": s.precision, "confidence": s.confidence} for s in info.symbols]
-            if info.symbols:
-                out.append(f"Changed symbols ({precision_label(info.analyzer, info.precision, info.confidence)}):")
+            diff_row = changed_by_file.get(f, {"added": [], "removed": [], "changed": []})
+            changed_symbols = (
+                [{"name": s["name"], "change": "added"} for s in diff_row.get("added", [])]
+                + [{"name": s["name"], "change": "removed"} for s in diff_row.get("removed", [])]
+                + [{"name": s["name"], "change": "signature"} for s in diff_row.get("changed", [])]
+            )
+            row["changed_symbols"] = changed_symbols
+            if changed_symbols:
+                out.append(f"Actually changed symbols ({precision_label(info.analyzer, info.precision, info.confidence)}):")
+                for s in changed_symbols:
+                    out.append(f"- {s['change']} {s['name']}")
+            elif info.symbols:
+                out.append(f"File symbol inventory ({precision_label(info.analyzer, info.precision, info.confidence)}):")
                 for s in info.symbols:
                     out.append(f"- {s.kind} {s.name}  [{precision_label(s.analyzer, s.precision, s.confidence)}]")
             effects = info.side_effects or extract_side_effects(idx.text(f))
@@ -937,9 +927,25 @@ def cmd_review(args) -> int:
             row["tests"] = tests
             all_tests.extend(tests)
             out += fmt_list("Missing/related tests to inspect", tests)
+            row["hotspot"] = f in hotspot_set
+            row["commits_90d"] = churn.get(f, 0)
+            summary_bits = []
+            if changed_symbols:
+                summary_bits.append(f"{len(changed_symbols)} changed symbols")
+            if effects:
+                summary_bits.append(f"side effects: {', '.join(effects[:2])}")
+            if row["hotspot"]:
+                summary_bits.append(f"hotspot ({row['commits_90d']} commits/90d)")
+            if not tests:
+                summary_bits.append("no likely tests found")
+            row["semantic_risk_summary"] = "; ".join(summary_bits) or "no elevated semantic risk detected"
         rows.append(row)
     pytests = sorted(set(t for t in all_tests if t.endswith(".py")))
     suggested = "pytest " + " ".join(pytests) if pytests else "run targeted project tests"
+    semantic_risk_summary = [
+        {"file": row["file"], "summary": row.get("semantic_risk_summary", "not indexed")}
+        for row in rows
+    ]
     if getattr(args, "security", False):
         out.append("\nSecurity findings:")
         if all_security:
@@ -951,7 +957,13 @@ def cmd_review(args) -> int:
     out.append(f"- {suggested}")
     out.append("- codeward impact --changed")
     if getattr(args, "json_output", False):
-        print(json.dumps({"command": "review", "files": rows, "security_findings": all_security, "suggested_command": suggested}, indent=2))
+        print(json.dumps({
+            "command": "review",
+            "files": rows,
+            "security_findings": all_security,
+            "suggested_command": suggested,
+            "semantic_risk_summary": semantic_risk_summary,
+        }, indent=2))
     else:
         print("\n".join(out))
     return 0
@@ -1108,6 +1120,72 @@ def _git_log_commits(since: str = "90d", max_commits: int = 2000) -> list[list[s
         if paths:
             commits.append(paths)
     return commits
+
+
+def _recent_churn_and_hotspots(idx: RepoIndex) -> tuple[Counter[str], set[str]]:
+    commits = _git_log_commits("90d", 2000)
+    churn: Counter[str] = Counter()
+    for paths in commits:
+        for path in paths:
+            if path in idx.files:
+                churn[path] += 1
+    if not churn:
+        return churn, set()
+    values = sorted(churn.values(), reverse=True)
+    pivot = values[len(values) // 10] if len(values) >= 10 else values[0]
+    threshold = max(3, pivot)
+    return churn, {path for path, commits_90d in churn.items() if commits_90d >= threshold}
+
+
+def _cochange_neighbors(idx: RepoIndex, target: str, top: int = 3) -> list[dict]:
+    co: Counter[str] = Counter()
+    for paths in _git_log_commits("90d", 2000):
+        if target not in paths:
+            continue
+        for path in paths:
+            if path != target and path in idx.files:
+                co[path] += 1
+    return [{"path": path, "co_changes": count} for path, count in co.most_common(top)]
+
+
+def _semantic_diff_rows(idx: RepoIndex, base: str) -> list[dict]:
+    from .index import analyze_file
+
+    cp = subprocess.run(["git", "diff", "--name-only", base], cwd=Path.cwd(), text=True, capture_output=True)
+    files = [f.strip() for f in cp.stdout.splitlines() if f.strip()]
+    rows: list[dict] = []
+    for rel in files:
+        if rel not in idx.files:
+            continue
+        cur_info = idx.files[rel]
+        cur_sig = {sym.name: (sym.kind, sym.signature or "") for sym in cur_info.symbols}
+        base_cp = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=Path.cwd(), text=True, capture_output=True)
+        if base_cp.returncode != 0:
+            rows.append({
+                "file": rel,
+                "status": "new",
+                "added": [{"name": name, "signature": sig[1]} for name, sig in cur_sig.items()],
+                "removed": [],
+                "changed": [],
+            })
+            continue
+        try:
+            base_info = analyze_file(rel, base_cp.stdout)
+        except Exception:
+            base_info = None
+        if not base_info:
+            rows.append({"file": rel, "status": "modified", "added": [], "removed": [], "changed": []})
+            continue
+        base_sig = {sym.name: (sym.kind, sym.signature or "") for sym in base_info.symbols}
+        added = [{"name": name, "signature": cur_sig[name][1]} for name in cur_sig if name not in base_sig]
+        removed = [{"name": name, "signature": base_sig[name][1]} for name in base_sig if name not in cur_sig]
+        changed = [
+            {"name": name, "before": base_sig[name][1], "after": cur_sig[name][1]}
+            for name in cur_sig if name in base_sig and cur_sig[name][1] != base_sig[name][1]
+        ]
+        if added or removed or changed:
+            rows.append({"file": rel, "status": "modified", "added": added, "removed": removed, "changed": changed})
+    return rows
 
 
 def _file_raw_tokens(idx: RepoIndex, rel: str) -> int:
@@ -1317,6 +1395,129 @@ def cmd_pack(args) -> int:
     }
     raw_estimate = sum(r["raw_tokens"] for r in included)
     emit_tracked(lines, "pack", raw_token_estimate=raw_estimate, payload=payload, json_mode=json_mode)
+    return 0
+
+
+def _diff_pack_file_row(
+    idx: RepoIndex,
+    rel: str,
+    semantic_rows: dict[str, dict],
+    churn: Counter[str],
+    hotspot_set: set[str],
+    top_symbols: int,
+    security: bool,
+) -> dict:
+    info = idx.files.get(rel)
+    diff_row = semantic_rows.get(rel, {"added": [], "removed": [], "changed": []})
+    changed_symbols = (
+        [{"name": row["name"], "change": "added"} for row in diff_row.get("added", [])]
+        + [{"name": row["name"], "change": "removed"} for row in diff_row.get("removed", [])]
+        + [{"name": row["name"], "change": "signature"} for row in diff_row.get("changed", [])]
+    )[:top_symbols]
+    dependents = idx.dependents_of_file(rel) if info else []
+    tests = idx.tests_for(rel)
+    side_effects = list(info.side_effects) if info else []
+    neighbors = _cochange_neighbors(idx, rel, top=3) if info else []
+    security_findings = extract_security_findings(idx.text(rel), info.lang) if security and info else []
+    hotspot = rel in hotspot_set
+    commits_90d = churn.get(rel, 0)
+    risk_points = (
+        3 * int(hotspot)
+        + 2 * int(bool(side_effects))
+        + 2 * int(bool(security_findings))
+        + min(3, len(dependents))
+        + int(bool(changed_symbols))
+        + int(not tests)
+    )
+    risk = "HIGH" if risk_points >= 5 else "MEDIUM" if risk_points >= 2 else "LOW"
+    return {
+        "path": rel,
+        "risk": risk,
+        "risk_points": risk_points,
+        "hotspot": hotspot,
+        "commits_90d": commits_90d,
+        "changed_symbols": changed_symbols,
+        "likely_tests": tests,
+        "dependents": dependents,
+        "neighbors": neighbors,
+        "side_effects": side_effects,
+        "security_findings": security_findings,
+    }
+
+
+def _render_diff_pack_lines(base: str, rows: list[dict], max_tokens: int, security: bool) -> list[str]:
+    lines = [
+        "# Codeward diff pack",
+        f"Base: {base}",
+        f"Budget: ~{max_tokens} tokens",
+        f"Security scan: {'on' if security else 'off'}",
+        "",
+        "Included changed files:",
+    ]
+    for row in rows:
+        lines.append(f"- {row['path']} — risk={row['risk']}, changed_symbols={len(row['changed_symbols'])}, hotspot={'yes' if row['hotspot'] else 'no'}")
+        if row["changed_symbols"]:
+            lines.append("  symbols: " + ", ".join(f"{sym['change']} {sym['name']}" for sym in row["changed_symbols"]))
+        if row["likely_tests"]:
+            lines.append("  likely tests: " + ", ".join(row["likely_tests"][:4]))
+        if row["dependents"]:
+            lines.append("  dependents: " + ", ".join(row["dependents"][:4]))
+        if row["neighbors"]:
+            lines.append("  co-change neighbors: " + ", ".join(n["path"] for n in row["neighbors"]))
+        if row["side_effects"]:
+            lines.append("  side effects: " + ", ".join(row["side_effects"][:4]))
+        if row["security_findings"]:
+            lines.append("  security findings: " + ", ".join(row["security_findings"][:4]))
+    if not rows:
+        lines.append("- none found")
+    lines.append("")
+    lines.append(f"Estimated pack tokens: {estimate_tokens(chr(10).join(lines))}")
+    return lines
+
+
+def cmd_diff_pack(args) -> int:
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    base = getattr(args, "base", None) or "HEAD"
+    max_tokens = max(80, int(getattr(args, "max_tokens", 800) or 800))
+    top_symbols = max(1, int(getattr(args, "top_symbols", 6) or 6))
+    files = idx.changed_files(base if getattr(args, "base", None) else None)
+    semantic_rows = {row["file"]: row for row in _semantic_diff_rows(idx, base)}
+    churn, hotspot_set = _recent_churn_and_hotspots(idx)
+    candidates = [
+        _diff_pack_file_row(
+            idx,
+            rel,
+            semantic_rows,
+            churn,
+            hotspot_set,
+            top_symbols,
+            getattr(args, "security", False),
+        )
+        for rel in files
+        if rel in idx.files
+    ]
+    candidates.sort(key=lambda row: (row["risk_points"], len(row["changed_symbols"]), len(row["dependents"])), reverse=True)
+    included: list[dict] = []
+    for row in candidates:
+        trial = included + [row]
+        trial_lines = _render_diff_pack_lines(base, trial, max_tokens, getattr(args, "security", False))
+        if included and estimate_tokens("\n".join(trial_lines)) > max_tokens:
+            continue
+        included = trial
+    lines = _render_diff_pack_lines(base, included, max_tokens, getattr(args, "security", False))
+    payload = {
+        "command": "diff-pack",
+        "base": base,
+        "changed": bool(getattr(args, "changed", False)),
+        "max_tokens": max_tokens,
+        "top_symbols": top_symbols,
+        "security": bool(getattr(args, "security", False)),
+        "estimated_pack_tokens": estimate_tokens("\n".join(lines)),
+        "included_files": [row["path"] for row in included],
+        "files": included,
+    }
+    emit_tracked(lines, "diff-pack", raw_token_estimate=None, payload=payload, json_mode=json_mode)
     return 0
 
 
@@ -2168,6 +2369,13 @@ def build_parser() -> argparse.ArgumentParser:
     gp.set_defaults(func=cmd_gain)
     bd = sub.add_parser("budget", parents=[common]); bd.add_argument("target", nargs="?"); bd.add_argument("--top", type=int, default=10); bd.set_defaults(func=cmd_budget)
     pk = sub.add_parser("pack", parents=[common]); pk.add_argument("target"); pk.add_argument("--max-tokens", type=int, default=800); pk.add_argument("--top-symbols", type=int, default=6); pk.set_defaults(func=cmd_pack)
+    dp = sub.add_parser("diff-pack", parents=[common], help="Budgeted semantic context bundle for changed files")
+    dp.add_argument("--changed", action="store_true", help="Use working-tree changes")
+    dp.add_argument("--base", help="Diff against this ref instead of the working tree")
+    dp.add_argument("--max-tokens", type=int, default=800)
+    dp.add_argument("--top-symbols", type=int, default=6)
+    dp.add_argument("--security", action="store_true")
+    dp.set_defaults(func=cmd_diff_pack)
     hs = sub.add_parser("hotspots", parents=[common], help="Rank files by risk = recent churn x dependents")
     hs.add_argument("--since", default="90d", help="Git log window, e.g. 30d, 6.months, 2024-01-01 (default: 90d)")
     hs.add_argument("--top", type=int, default=10, help="Number of files to return (default: 10)")

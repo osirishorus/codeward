@@ -202,6 +202,28 @@ def create_server():
             _ns(target=target, changed=changed, base=base, security=security),
         )
 
+    @mcp.tool()
+    def codeward_diff_pack(
+        changed: bool = True,
+        base: str | None = None,
+        max_tokens: int = 800,
+        top_symbols: int = 6,
+        security: bool = False,
+    ) -> dict:
+        """Budgeted semantic bundle for changed files: changed symbols, likely
+        tests, dependents, co-change neighbors, risk, and optional security
+        findings. Use for branch understanding and review planning."""
+        return _run(
+            _cli.cmd_diff_pack,
+            _ns(
+                changed=changed,
+                base=base,
+                max_tokens=max_tokens,
+                top_symbols=top_symbols,
+                security=security,
+            ),
+        )
+
     # ---- Git history awareness -----------------------------------------
 
     @mcp.tool()

@@ -166,6 +166,14 @@ def test_routes():
     assert "tests/test_user_routes.py" not in result.stdout
 
 
+def test_tests_for_short_module_name_matches_exact_test_stem(sample_repo):
+    (sample_repo / "src" / "cli.py").write_text("def main():\n    return 0\n")
+    (sample_repo / "tests" / "test_cli.py").write_text("def test_main():\n    assert True\n")
+    result = run_cli(["tests-for", "src/cli.py"], sample_repo)
+    assert result.returncode == 0
+    assert "tests/test_cli.py" in result.stdout
+
+
 def test_impact_changed_file(sample_repo):
     target = sample_repo / "src" / "services" / "user_service.py"
     target.write_text(target.read_text() + "\n# changed\n")
@@ -1188,9 +1196,15 @@ def test_json_precision_metadata_for_read_symbol_callgraph_preflight_review(samp
 
     pre_d = json.loads(run_cli(["preflight", "--json", "src/services/user_service.py"], sample_repo).stdout)
     assert pre_d["analyzer"] == "python_ast"
+    assert "hotspot" in pre_d
+    assert "commits_90d" in pre_d
+    assert "neighbors" in pre_d
+    assert pre_d["recommended_checks"]
 
     review_d = json.loads(run_cli(["review", "--json", "src/services/user_service.py"], sample_repo).stdout)
     assert "symbols" in review_d["files"][0]
+    assert "changed_symbols" in review_d["files"][0]
+    assert "semantic_risk_summary" in review_d
 
 
 def test_blame_aggregates_authors(sample_repo):
@@ -1213,6 +1227,15 @@ def test_sdiff_detects_added_symbol(sample_repo):
     assert file_row is not None
     added_names = {a["name"] for a in file_row["added"]}
     assert "brand_new_helper" in added_names
+
+
+def test_review_changed_reports_actually_changed_symbols(sample_repo):
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text(target.read_text() + "\n\ndef branch_helper():\n    return 1\n")
+    payload = json.loads(run_cli(["review", "--json", "--changed"], sample_repo).stdout)
+    row = next(f for f in payload["files"] if f["file"].endswith("user_service.py"))
+    assert any(sym["name"] == "branch_helper" for sym in row["changed_symbols"])
+    assert "changed symbols" in row["semantic_risk_summary"]
 
 
 def test_watch_reindex_updates_sqlite_on_file_event(sample_repo):
@@ -1407,6 +1430,29 @@ def test_pack_builds_budgeted_context_bundle(sample_repo):
     assert payload["command"] == "pack"
     assert payload["target"] == "src/services/user_service.py"
     assert "src/services/user_service.py" in payload["included_files"]
+
+
+def test_diff_pack_builds_budgeted_changed_bundle(sample_repo):
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text(target.read_text() + "\n\ndef diff_pack_helper():\n    return 1\n")
+    payload = json.loads(run_cli(["diff-pack", "--json", "--changed", "--max-tokens", "220"], sample_repo).stdout)
+    assert payload["command"] == "diff-pack"
+    assert payload["included_files"]
+    row = payload["files"][0]
+    assert row["path"] == "src/services/user_service.py"
+    assert any(sym["name"] == "diff_pack_helper" for sym in row["changed_symbols"])
+    assert payload["estimated_pack_tokens"] > 0
+
+
+def test_diff_pack_base_mode_and_security(sample_repo):
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text(target.read_text() + "\n\nimport subprocess\n\ndef risky_shell(cmd):\n    return subprocess.run(cmd, shell=True)\n")
+    subprocess.run(["git", "add", "."], cwd=sample_repo, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "risky"], cwd=sample_repo, capture_output=True, text=True)
+    payload = json.loads(run_cli(["diff-pack", "--json", "--base", "HEAD~1", "--security"], sample_repo).stdout)
+    assert payload["command"] == "diff-pack"
+    assert payload["files"]
+    assert any(row["security_findings"] for row in payload["files"])
 
 
 def _commit_change(repo: Path, rel: str, content: str, msg: str) -> None:
