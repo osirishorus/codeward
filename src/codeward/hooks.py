@@ -310,20 +310,39 @@ def _read_history(path: Path) -> list[dict]:
     return rows
 
 
-def _format_gain_row(r: dict, width: int = 50) -> list[str]:
-    """Format a single history row as 2-3 lines, mirroring RTK's per-call style."""
+_RULE_HEAVY = "═" * 60
+_RULE_LIGHT = "─" * 60
+
+
+def _meter(pct: float, width: int = 24) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round(width * pct / 100.0))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _is_synthetic_original(s: str) -> bool:
+    """True when 'original' came from _infer_raw_analogue's fallback paths
+    (no honest shell equivalent). Those rows look cleaner without the arrow."""
+    return s.startswith("(equivalent of)") or s.startswith("(no direct shell equivalent")
+
+
+def _format_gain_row(r: dict, idx: int) -> list[str]:
+    """Format a single history row as 2-3 indented lines under the 'Top savings' header."""
     raw = r.get("raw_tokens", 0)
     out_t = r.get("output_tokens", 0)
     saved = r.get("saved_tokens", 0)
     pct = (saved / raw * 100) if raw else 0
-    kind, original, rewritten = parse_command_field(r.get("command", ""))
+    _, original, rewritten = parse_command_field(r.get("command", ""))
     lines = []
-    if original != rewritten:
-        lines.append(f"  {original}")
-        lines.append(f"    → {rewritten}")
+    head = f" {idx:>2}. "
+    if original != rewritten and not _is_synthetic_original(original):
+        lines.append(f"{head}{original}")
+        lines.append(f"       → {rewritten}")
     else:
-        lines.append(f"  {rewritten}")
-    lines.append(f"    raw {raw:>6} → cs {out_t:>5}    saved {saved:>6} ({pct:>5.1f}%)")
+        lines.append(f"{head}{rewritten}")
+    lines.append(
+        f"     raw {raw:>7,} → cs {out_t:>6,}   saved {saved:>7,} ({pct:>5.1f}%)"
+    )
     return lines
 
 
@@ -337,7 +356,7 @@ def gain(root: Path, *, scope: str = "global") -> str:
     """
     if scope == "repo":
         rows = _read_history(root / HISTORY)
-        title = "Codeward token savings (this repo)"
+        scope_label = "this repo"
         empty = "No Codeward history in this repo yet. Run `codeward read <file>` or `codeward init --hook`."
     elif scope == "all":
         local = _read_history(root / HISTORY)
@@ -350,11 +369,11 @@ def gain(root: Path, *, scope: str = "global") -> str:
                 continue
             seen.add(key)
             rows.append(r)
-        title = "Codeward token savings (all repos + global)"
+        scope_label = "all repos + global"
         empty = "No Codeward history yet. Run a `codeward read`/`slice`/etc. command, or enable hooks."
     else:
         rows = _read_history(global_history_path())
-        title = "Codeward token savings (all repos)"
+        scope_label = "all repos"
         empty = f"No history yet at {global_history_path()}. Run a `codeward` command first."
 
     if not rows:
@@ -362,15 +381,21 @@ def gain(root: Path, *, scope: str = "global") -> str:
 
     saved = sum(r.get("saved_tokens", 0) for r in rows)
     total_raw = sum(r.get("raw_tokens", 0) for r in rows)
+    total_out = sum(r.get("output_tokens", 0) for r in rows)
     pct = (saved / total_raw * 100) if total_raw else 0
     top = sorted(rows, key=lambda r: r.get("saved_tokens", 0), reverse=True)[:8]
 
     out = [
-        title,
-        f"  {len(rows)} commands tracked   raw {total_raw:,} → cs {sum(r.get('output_tokens', 0) for r in rows):,}   saved {saved:,} ({pct:.1f}%)",
+        f"Codeward token savings — {scope_label} ({len(rows)} commands tracked)",
+        _RULE_HEAVY,
+        f"  Raw tokens       {total_raw:>10,}",
+        f"  Output tokens    {total_out:>10,}",
+        f"  Tokens saved     {saved:>10,}   ({pct:.1f}%)",
+        f"  Efficiency       {_meter(pct)} {pct:>5.1f}%",
         "",
-        "Top savings:",
+        "Top savings",
+        _RULE_LIGHT,
     ]
-    for r in top:
-        out.extend(_format_gain_row(r))
+    for i, r in enumerate(top, start=1):
+        out.extend(_format_gain_row(r, i))
     return "\n".join(out)
