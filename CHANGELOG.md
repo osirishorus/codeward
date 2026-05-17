@@ -4,6 +4,13 @@ All notable changes to Codeward will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning after `0.1.0`.
 
+## [0.5.1] - 2026-05-16
+
+### Added
+
+- **Codex CLI hook integration.** OpenAI Codex shipped PreToolUse hooks with Claude's response shape; `--codex` on `codeward init --hook` now writes a `^apply_patch$` PreToolUse entry to `~/.codex/hooks.json` that injects preflight context (dependents, tests, side-effects, routes, blast-radius) before every file edit. Bash rewrite stays off for Codex because Codex hooks parse but don't honor `updatedInput`.
+- `codeward hook --agent codex` is now a first-class adapter. `codeward doctor` reports the Codex hook state alongside Claude and Gemini.
+
 ## [0.5.0] - 2026-05-16
 
 Focused on reach: more languages, more frameworks, easier install, and three real bug fixes.

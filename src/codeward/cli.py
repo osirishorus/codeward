@@ -2039,6 +2039,32 @@ def cmd_doctor(args) -> int:
     state, _, _ = hook_position(project_settings)
     lines.append(f"Project hook ({project_settings}): {state}")
 
+    # Gemini / Codex hook presence — quick existence + matcher check. We
+    # don't validate ordering for these (only Claude has the RTK collision
+    # concern). Codex's hooks.json shares Claude's `{"hooks":{...}}` shape
+    # but uses an `^apply_patch$` matcher rather than `Bash`.
+    for label, settings_path, matcher_key in [
+        ("Gemini hook", Path.home() / ".gemini" / "settings.json", "BeforeTool"),
+        ("Codex hook", Path.home() / ".codex" / "hooks.json", "PreToolUse"),
+    ]:
+        if not settings_path.exists():
+            lines.append(f"{label} ({settings_path}): absent")
+            continue
+        try:
+            data = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            lines.append(f"{label} ({settings_path}): malformed JSON")
+            issues.append(f"{label} settings.json malformed at {settings_path}")
+            continue
+        hooks = (data or {}).get("hooks") if isinstance(data, dict) else None
+        entries = (hooks or {}).get(matcher_key) if isinstance(hooks, dict) else None
+        has_codeward = any(
+            isinstance(e, dict)
+            and any(isinstance(h, dict) and "codeward" in str(h.get("command", "")) for h in (e.get("hooks") or []))
+            for e in (entries or [])
+        )
+        lines.append(f"{label} ({settings_path}): {'installed' if has_codeward else 'present but no Codeward entry'}")
+
     shim_dir = Path.cwd() / ".codeward" / "bin"
     on_path = any(Path(p).resolve() == shim_dir.resolve() for p in os.environ.get("PATH", "").split(os.pathsep) if p)
     if shim_dir.exists():
@@ -2249,6 +2275,20 @@ def insert_edit_hook_entry(settings_path: Path, hook_command: str, matcher: str 
     return "added"
 
 
+def insert_codex_edit_hook_entry(settings_path: Path, hook_command: str = "codeward hook --agent codex") -> str:
+    """Idempotently install a Codex CLI PreToolUse hook on the `apply_patch`
+    tool (Codex's name for Edit/Write). Writes to `~/.codex/hooks.json`
+    (or `<repo>/.codex/hooks.json`) — Codex's standalone hooks file shares
+    Claude's `{"hooks": {"PreToolUse": [...]}}` shape, so this is a thin
+    wrapper around `insert_edit_hook_entry` with the Codex matcher.
+
+    Codex does NOT honor `updatedInput` from PreToolUse hooks, so this only
+    wires the Edit/Write preflight path — the Bash rewrite hook (which
+    relies on `updatedInput`) is intentionally skipped for Codex.
+    """
+    return insert_edit_hook_entry(settings_path, hook_command, matcher="^apply_patch$")
+
+
 def insert_hook_entry(settings_path: Path, hook_command: str) -> str:
     """Idempotently insert a PreToolUse Bash hook before any existing rtk entry.
     Returns 'added', 'noop', or 'reordered'.
@@ -2431,6 +2471,21 @@ def cmd_init(args) -> int:
             except RuntimeError as e:
                 print(f"Gemini hook install failed: {e}", file=sys.stderr)
 
+    # Codex CLI hook: PreToolUse/apply_patch with the same Claude-shaped
+    # additionalContext response. Bash rewrite is unsupported on Codex
+    # (updatedInput is ignored), so we only wire the Edit/Write preflight.
+    if getattr(args, "install_codex_hook", False):
+        codex_settings = Path.home() / ".codex" / "hooks.json"
+        codex_settings.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            outcome = insert_codex_edit_hook_entry(codex_settings)
+            if outcome == "added":
+                print(f"Installed Codex PreToolUse/apply_patch preflight hook into {codex_settings}.")
+            else:
+                print(f"Codex hook already present in {codex_settings} (no change).")
+        except RuntimeError as e:
+            print(f"Codex hook install failed: {e}", file=sys.stderr)
+
     if rtk_present and not no_bash:
         print("RTK is active. Codeward will rewrite to `codeward ...` first; RTK passes those through unchanged.")
     if not no_bash:
@@ -2519,7 +2574,7 @@ def build_parser() -> argparse.ArgumentParser:
     nb.set_defaults(func=cmd_neighbors)
     sv = sub.add_parser("savings"); sv.add_argument("--command", action="append"); sv.add_argument("--no-history", action="store_true"); sv.set_defaults(func=cmd_savings)
     co = sub.add_parser("coach"); co.add_argument("command", nargs=argparse.REMAINDER); co.set_defaults(func=cmd_coach)
-    hk = sub.add_parser("hook"); hk.add_argument("--agent", choices=["claude", "cursor", "gemini", "generic"], default="claude"); hk.set_defaults(func=cmd_hook)
+    hk = sub.add_parser("hook"); hk.add_argument("--agent", choices=["claude", "cursor", "gemini", "codex", "generic"], default="claude"); hk.set_defaults(func=cmd_hook)
     init = sub.add_parser("init")
     init.add_argument("--hook", action="store_true", help="Also install Claude Code Bash hook (opt-in; orders before any RTK entry)")
     init.add_argument("--global", dest="global_install", action="store_true",
@@ -2528,6 +2583,9 @@ def build_parser() -> argparse.ArgumentParser:
                       "When combined with --hook, additionally wires ~/.claude/settings.json.")
     init.add_argument("--gemini", dest="install_gemini_hook", action="store_true",
                       help="Also install the Gemini CLI BeforeTool/run_shell_command hook in ~/.gemini/settings.json")
+    init.add_argument("--codex", dest="install_codex_hook", action="store_true",
+                      help="Also install the Codex CLI PreToolUse/apply_patch preflight hook in ~/.codex/hooks.json. "
+                      "Bash rewrite is unsupported on Codex (updatedInput is ignored); only the Edit/Write preflight runs.")
     init.add_argument("--no-hook-bash", action="store_true",
                       help="Skip the Bash rewrite hook (install only the Edit/Write preflight). "
                       "Useful when RTK already owns the Bash surface and you just want pre-edit context.")

@@ -235,9 +235,9 @@ All 20 read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_s
 |---|---|---|
 | **Claude Code** | ✅ `PreToolUse` | `--hook` / `--hook --global` writes `~/.claude/settings.json`. Two matchers: `Bash` (rewrite) + `Edit\|Write\|MultiEdit` (preflight) |
 | **Gemini CLI** | ✅ `BeforeTool` | `--gemini` writes `~/.gemini/settings.json` (matcher: `run_shell_command`) |
+| **Codex CLI** | ✅ `PreToolUse` (Edit only) | `--codex` writes `~/.codex/hooks.json` (matcher: `^apply_patch$`). Edit-time preflight only — Codex hooks don't support `updatedInput`, so Bash rewrite is skipped |
 | **Cursor** | ✅ Extension API | None automatic — paste `codeward hook --agent cursor` into a Cursor plugin |
-| **Codex** | ❌ no shell hook | Vocabulary only via `~/.codex/AGENTS.md` (written by `init --global`); or `init-agent` for PATH shims |
-| **Aider / OpenCode / shell agents** | ❌ no shell hook | Same as Codex — vocabulary + optional `init-agent` shims |
+| **Aider / OpenCode / shell agents** | ❌ no shell hook | Vocabulary via `init --global` + optional `init-agent` PATH shims |
 
 ```bash
 # Most common combinations
@@ -245,8 +245,9 @@ codeward init --hook                          # Claude, project-local
 codeward init --hook --global                 # Claude, every repo
 codeward init --hook --no-hook-bash           # Claude edit-preflight only (w/ RTK)
 codeward init --hook --global --gemini        # Claude + Gemini, global
+codeward init --hook --global --codex         # Claude + Codex edit-preflight, global
 codeward init --global                        # vocab only (writes CLAUDE/AGENTS/GEMINI.md)
-codeward init-agent && export PATH="$PWD/.codeward/bin:$PATH"   # Codex/Aider PATH shims
+codeward init-agent && export PATH="$PWD/.codeward/bin:$PATH"   # Aider/OpenCode PATH shims
 ```
 
 ## Case study: refactor on FastAPI

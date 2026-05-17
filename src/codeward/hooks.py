@@ -128,6 +128,11 @@ def noop_response(agent: str) -> dict | None:
         return {"decision": "allow"}
     if agent == "cursor":
         return {}
+    if agent == "codex":
+        # Codex treats `exit 0 / no stdout` as "no-op" (no context injected,
+        # default permission). An empty dict prints `{}` which Codex still
+        # parses as a no-op; we return None to skip writing anything.
+        return None
     return None
 
 
@@ -137,7 +142,13 @@ def tracked_rewrite_command(original: str, rewritten: str, track: bool = True) -
     return "CODEWARD_ORIGINAL_COMMAND=" + shlex.quote(original) + " " + rewritten
 
 
-EDIT_TOOL_NAMES = {"edit", "write", "multiedit", "notebookedit", "create_file", "str_replace_editor"}
+EDIT_TOOL_NAMES = {
+    "edit", "write", "multiedit", "notebookedit", "create_file", "str_replace_editor",
+    # Codex CLI calls every file mutation through `apply_patch` — that tool
+    # name is the one to match for PreToolUse on Codex. It's also used as an
+    # alias for Edit/Write per the Codex hooks docs.
+    "apply_patch",
+}
 
 
 def _preflight_for_file(file_path: str, root: Path) -> str | None:
@@ -183,7 +194,11 @@ def edit_hook_response(payload: dict, agent: str = "claude") -> dict | None:
     summary = _preflight_for_file(str(file_path), Path.cwd())
     if not summary:
         return noop_response(agent)
-    if agent == "claude":
+    if agent in ("claude", "codex"):
+        # Codex CLI adopted Claude's `hookSpecificOutput.additionalContext`
+        # response shape verbatim, so a single branch handles both. Codex
+        # does NOT accept `updatedInput`, but that's only relevant for the
+        # Bash rewrite path — preflight only needs additionalContext.
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -213,6 +228,12 @@ def hook_response(payload: dict, agent: str = "claude") -> dict | None:
     cmd = tool_input.get("command") or tool_input.get("cmd") or ""
     rewritten = rewrite_command(str(cmd))
     if not rewritten:
+        return noop_response(agent)
+    # Codex PreToolUse hooks parse but do not honor `updatedInput`
+    # (documented as "fail open"). We can't substitute the agent's command
+    # there, so the Bash branch is a no-op on Codex — preflight via
+    # apply_patch is still wired up separately and still works.
+    if agent == "codex":
         return noop_response(agent)
     updated = dict(tool_input)
     is_raw_escape = str(cmd).strip().startswith("!raw ")

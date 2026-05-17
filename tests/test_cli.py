@@ -1703,3 +1703,103 @@ def test_extended_language_extraction_smoke(tmp_path):
         assert read["analyzer"] == "tree_sitter", f"{filename}: analyzer={read.get('analyzer')}"
         names = {s["name"] for s in read.get("symbols", [])}
         assert expected_symbol in names, f"{filename}: expected {expected_symbol} in {names}"
+
+
+# ---- 0.5.1: Codex CLI hook adapter ----
+
+
+def test_codex_hook_apply_patch_injects_preflight(sample_repo):
+    """Edit/Write preflight for Codex's `apply_patch` tool should return a
+    Claude-shaped `hookSpecificOutput.additionalContext` payload — Codex
+    adopted Claude's response format verbatim, so this verifies one branch
+    handles both."""
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {"file_path": "src/services/user_service.py"},
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "codeward.cli", "hook", "--agent", "codex"],
+        cwd=sample_repo,
+        text=True,
+        capture_output=True,
+        input=json.dumps(payload),
+        env={"PYTHONPATH": str(SRC)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    response = json.loads(proc.stdout)
+    hso = response["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "allow"
+    assert "Codeward preflight" in hso["additionalContext"]
+    assert "src/services/user_service.py" in hso["additionalContext"]
+
+
+def test_codex_hook_bash_is_noop(sample_repo):
+    """Codex doesn't support `updatedInput`, so Bash rewrite is intentionally
+    skipped on agent=codex — even when the rewrite logic itself would have
+    fired. Output must be empty so Codex treats it as a no-op."""
+    payload = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "cat src/services/user_service.py"},
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "codeward.cli", "hook", "--agent", "codex"],
+        cwd=sample_repo,
+        text=True,
+        capture_output=True,
+        input=json.dumps(payload),
+        env={"PYTHONPATH": str(SRC)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    # noop_response("codex") returns None → hook script writes nothing.
+    assert proc.stdout.strip() == "", f"expected no-op, got {proc.stdout!r}"
+
+
+def test_init_hook_codex_writes_apply_patch_entry(sample_repo, tmp_path):
+    """`init --hook --codex` writes a PreToolUse/^apply_patch$ entry to
+    ~/.codex/hooks.json. Idempotent on re-run."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    cmd = [sys.executable, "-m", "codeward.cli", "init", "--hook", "--codex"]
+    result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    assert result.returncode == 0, result.stderr
+
+    hooks_file = fake_home / ".codex" / "hooks.json"
+    assert hooks_file.exists(), result.stdout
+    data = json.loads(hooks_file.read_text())
+    pre = data["hooks"]["PreToolUse"]
+    matching = [
+        e for e in pre
+        if e.get("matcher") == "^apply_patch$"
+        and any("codeward" in (h.get("command") or "") for h in (e.get("hooks") or []))
+    ]
+    assert len(matching) == 1, f"expected exactly 1 codeward apply_patch entry, got {len(matching)}: {pre}"
+
+    # Re-run must not duplicate.
+    subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
+    data2 = json.loads(hooks_file.read_text())
+    matching2 = [
+        e for e in data2["hooks"]["PreToolUse"]
+        if e.get("matcher") == "^apply_patch$"
+        and any("codeward" in (h.get("command") or "") for h in (e.get("hooks") or []))
+    ]
+    assert len(matching2) == 1
+
+
+def test_doctor_reports_codex_hook(sample_repo, tmp_path):
+    """`doctor` should report Codex hook presence after install."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    subprocess.run(
+        [sys.executable, "-m", "codeward.cli", "init", "--hook", "--codex"],
+        cwd=sample_repo, text=True, capture_output=True, env=env,
+    )
+    doc = subprocess.run(
+        [sys.executable, "-m", "codeward.cli", "doctor"],
+        cwd=sample_repo, text=True, capture_output=True, env=env,
+    )
+    assert doc.returncode == 0, doc.stderr
+    assert "Codex hook" in doc.stdout
+    assert "installed" in doc.stdout

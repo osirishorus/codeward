@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codeward"
-version = "0.5.0"
+version = "0.5.1"
 description = "Semantic codebase intelligence CLI for coding agents — composes with RTK"
 readme = "README.md"
 requires-python = ">=3.11"
