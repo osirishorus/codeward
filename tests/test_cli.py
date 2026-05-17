@@ -22,8 +22,11 @@ def run_cli(args, cwd):
 
 
 def test_package_metadata_prepares_and_includes_runtime_dependencies(tmp_path):
-    """Release metadata must build and expose the runtime dependencies."""
-    import setuptools.build_meta as build_meta
+    """Release metadata must build and expose the runtime dependencies.
+    setuptools isn't preinstalled on Python 3.12+ runners — CI installs it
+    explicitly, but skip locally if the dev env doesn't have it rather than
+    failing the suite over a missing build dep."""
+    build_meta = pytest.importorskip("setuptools.build_meta")
 
     metadata_dir = build_meta.prepare_metadata_for_build_wheel(str(tmp_path))
     metadata = (tmp_path / metadata_dir / "METADATA").read_text()

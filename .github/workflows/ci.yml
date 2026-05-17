@@ -23,7 +23,11 @@ jobs:
       - name: Install package and test tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest build twine
+          # setuptools is the build backend (pyproject `build-system.requires`)
+          # but Python 3.12+ runners no longer preinstall it, and our
+          # `test_package_metadata_*` test imports `setuptools.build_meta`
+          # directly. Pin it in the test env so the test isn't environment-flaky.
+          python -m pip install -e . pytest build twine setuptools
 
       - name: Smoke CLI
         run: |
