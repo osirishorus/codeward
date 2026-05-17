@@ -1,0 +1,4 @@
+/* Codeward demo uses inline styles only — Tailwind import removed since
+ * the skill forbids tailwind animation classes and the scaffolder added
+ * tailwind anyway despite --no-tailwind.
+ */
