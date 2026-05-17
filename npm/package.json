@@ -1,0 +1,42 @@
+{
+  "name": "codeward",
+  "version": "0.5.0",
+  "description": "Symbol-level codebase intelligence for coding agents (Python under the hood; this is the npm/npx wrapper).",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "cursor",
+    "ai",
+    "agent",
+    "llm",
+    "rtk",
+    "tokens",
+    "codebase",
+    "tree-sitter"
+  ],
+  "homepage": "https://github.com/osirishorus/codeward",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/osirishorus/codeward.git",
+    "directory": "npm"
+  },
+  "license": "MIT",
+  "author": "osirishorus",
+  "bin": {
+    "codeward": "./bin/codeward.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "preferGlobal": true,
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "files": [
+    "bin/",
+    "README.md"
+  ]
+}

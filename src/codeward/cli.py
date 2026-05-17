@@ -173,13 +173,14 @@ def cmd_preflight(args) -> int:
         recommended_checks.append("inspect dependents and changed callers")
     if not recommended_checks:
         recommended_checks.append("run targeted project tests after editing")
+    route_summary = _summarize_routes(info.routes)
     payload = {
         "command": "preflight", "file": rel, "language": info.lang, "lines": info.lines,
         "analyzer": info.analyzer, "precision": info.precision, "confidence": info.confidence,
         "symbols": len(info.symbols), "dependents": deps, "tests": tests,
         "side_effects": info.side_effects, "security_findings": sec, "blast_radius": blast,
         "hotspot": hotspot, "commits_90d": commits_90d, "neighbors": neighbors,
-        "recommended_checks": recommended_checks,
+        "routes": list(info.routes.keys()), "recommended_checks": recommended_checks,
     }
     out = [
         f"# Codeward preflight: {rel}",
@@ -197,6 +198,8 @@ def cmd_preflight(args) -> int:
         out.append(f"  hotspot: yes ({commits_90d} commits in 90d)")
     if neighbors:
         out.append(f"  co-change neighbors: {', '.join(n['path'] for n in neighbors)}")
+    if route_summary:
+        out.append(f"  routes ({len(info.routes)}): {route_summary}")
     out.append(f"  recommended next checks: {'; '.join(recommended_checks[:2])}")
     if json_mode:
         print(json.dumps(payload, indent=2, default=str))
@@ -265,6 +268,93 @@ def cmd_api(args) -> int:
     return 0
 
 
+def _summarize_routes(routes: dict[str, str], limit: int = 4) -> str:
+    """Compact one-line render for preflight/pack output: 'GET /foo, POST /bar, …'."""
+    if not routes:
+        return ""
+    keys = list(routes.keys())[:limit]
+    suffix = ", …" if len(routes) > limit else ""
+    return ", ".join(keys) + suffix
+
+
+def cmd_routes(args) -> int:
+    """List HTTP routes detected across the repo, mapped to handler symbols.
+
+    Pattern-matches the common web framework idioms (FastAPI, Flask, Django,
+    Express, NestJS, Spring, Gin, Actix, Rails, Laravel, ASP.NET Core).
+    Output format: `<METHOD> <path>  →  <handler>  (file:line)`. Pass
+    `--filter` to substring-match the path or `--method GET` to filter verbs.
+    Pass a positional `target` to only inspect a single file or directory.
+    """
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    target = getattr(args, "target", None)
+    filt = (getattr(args, "filter", None) or "").lower()
+    only_method = (getattr(args, "method", None) or "").upper().strip()
+
+    if target:
+        target = target.replace("\\", "/")
+        if target in idx.files:
+            file_iter = [target]
+        else:
+            prefix = target.rstrip("/") + "/"
+            file_iter = sorted(p for p in idx.files if p == target or p.startswith(prefix))
+        if not file_iter:
+            msg = f"No files matched: {target}"
+            if json_mode:
+                print(json.dumps({"command": "routes", "target": target, "error": msg}, indent=2))
+            else:
+                print(msg, file=sys.stderr)
+            return 2
+    else:
+        file_iter = list(idx.files.keys())
+
+    rows: list[dict] = []
+    for rel in file_iter:
+        info = idx.files.get(rel)
+        if not info or not info.routes:
+            continue
+        for route, handler in info.routes.items():
+            method, _, path = route.partition(" ")
+            if only_method and method != only_method:
+                continue
+            if filt and filt not in path.lower():
+                continue
+            # Try to locate the handler symbol so we can link to file:line.
+            handler_loc: dict | None = None
+            short = handler.split(".")[-1].split("#")[-1]
+            for sym in idx.find_symbol(handler) + idx.find_symbol(short):
+                handler_loc = {"file": sym.file, "line": sym.line, "kind": sym.kind, "signature": sym.signature}
+                break
+            rows.append({
+                "method": method,
+                "path": path,
+                "handler": handler,
+                "declared_in": rel,
+                "framework_lang": info.lang,
+                "handler_location": handler_loc,
+            })
+
+    rows.sort(key=lambda r: (r["path"], r["method"]))
+    payload = {"command": "routes", "target": target, "count": len(rows), "routes": rows}
+    out = [f"# Codeward routes ({len(rows)})"]
+    if not rows:
+        out.append("No routes detected. Tip: extract patterns are framework-aware; metaprogrammed routes may not register.")
+    else:
+        # Right-align method, left-align path, then arrow + handler.
+        method_w = max((len(r["method"]) for r in rows), default=3)
+        path_w = max((len(r["path"]) for r in rows), default=4)
+        for r in rows:
+            loc = r["handler_location"]
+            loc_str = f"  ({loc['file']}:{loc['line']})" if loc else f"  ({r['declared_in']})"
+            out.append(f"  {r['method']:<{method_w}}  {r['path']:<{path_w}}  →  {r['handler']}{loc_str}")
+    if json_mode:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print("\n".join(out))
+    return 0
+
+
 def cmd_sdiff(args) -> int:
     """Semantic diff: list symbols added / removed / signature-changed between
     HEAD and a base ref. Replaces `git diff <base>` for symbol-level review.
@@ -308,7 +398,10 @@ def cmd_blame(args) -> int:
     idx = RepoIndex(Path.cwd())
     json_mode = getattr(args, "json_output", False)
     name = args.symbol
-    syms = idx.find_symbol(re.sub(r"\(\*?([A-Za-z_]\w*)\)\.", r"\1.", name))
+    normalized = re.sub(r"\(\*?([A-Za-z_]\w*)\)\.", r"\1.", name)
+    syms = idx.find_symbol(normalized)
+    if not syms:
+        syms = idx.find_symbol_fuzzy(normalized)
     if not syms:
         msg = f"Symbol not found: {name}"
         if json_mode:
@@ -386,13 +479,24 @@ def cmd_refs(args) -> int:
     syms = idx.find_symbol(name)
     bare = name.rsplit(".", 1)[-1]
     refs = idx.references_to(bare)
-    def_files = {(s.file, s.line) for s in syms}
+    # Filter strategy: tree-sitter and python_ast references are already
+    # syntax-aware — they exclude the definition node at parse time, so
+    # anything surviving is a genuine call/usage site even when it shares a
+    # line with the definition. Only regex-fallback refs need post-hoc
+    # filtering by (file, line). Without this split, single-line bodies like
+    # `class Server { void start() {} void run() { start(); } }` lose their
+    # legitimate call-site refs.
+    def_lines = {(s.file, s.line) for s in syms}
     include_defs = getattr(args, "include_defs", False)
-    rows = [
-        {"file": r.file, "line": r.line, "text": r.text[:160], "analyzer": r.analyzer, "precision": r.precision, "confidence": r.confidence, "kind": r.kind}
-        for r in refs
-        if include_defs or (r.file, r.line) not in def_files
-    ]
+    rows: list[dict] = []
+    for r in refs:
+        if not include_defs and r.analyzer == "regex" and (r.file, r.line) in def_lines:
+            continue
+        rows.append({
+            "file": r.file, "line": r.line, "text": r.text[:160],
+            "analyzer": r.analyzer, "precision": r.precision,
+            "confidence": r.confidence, "kind": r.kind,
+        })
     payload = {
         "command": "refs", "symbol": name,
         "definitions": [{"file": s.file, "line": s.line, "analyzer": s.analyzer, "precision": s.precision, "confidence": s.confidence} for s in syms],
@@ -428,6 +532,8 @@ def cmd_slice(args) -> int:
     if not syms and "." in normalized:
         # Fallback: search by the trailing component
         syms = idx.find_symbol(normalized.rsplit(".", 1)[-1])
+    if not syms:
+        syms = idx.find_symbol_fuzzy(normalized)
     if not syms:
         msg = f"Symbol not found: {name}"
         if json_mode:
@@ -616,6 +722,11 @@ def cmd_symbol(args) -> int:
     json_mode = getattr(args, "json_output", False)
     syms = idx.find_symbol(args.name)
     if not syms:
+        # Strict match failed — try case-insensitive / suffix / substring
+        # fallback. Saves a follow-up call when the user typed `initdb` or
+        # `init_db` for `initDB`, or asked for a method by its short name.
+        syms = idx.find_symbol_fuzzy(args.name)
+    if not syms:
         hits = idx.search(args.name)
         if json_mode:
             print(json.dumps({"command": "symbol", "name": args.name, "definitions": [], "text_matches": [{"file": r, "line": l, "text": t} for r, l, t in hits[:20]]}, indent=2))
@@ -664,14 +775,28 @@ def cmd_callgraph(args) -> int:
     chain: list[dict] = []
     handler = None
     route_file = None
+    # Route match: exact key first, then case-insensitive substring (so the
+    # agent can ask for `GET /users` and still find `GET /users/{id}`).
     for info in idx.files.values():
         if query in info.routes:
             handler = info.routes[query]
             route_file = info.path
-            out.append(f"{query}")
-            out.append(f"→ {handler}()")
-            chain.append({"step": query, "handler": handler, "kind": "route", "analyzer": info.analyzer, "precision": info.precision, "confidence": info.confidence})
             break
+    if handler is None:
+        q_lower = query.lower()
+        for info in idx.files.values():
+            for route, hnd in info.routes.items():
+                if q_lower in route.lower():
+                    handler = hnd
+                    route_file = info.path
+                    query = route  # render the actual matched route
+                    break
+            if handler is not None:
+                break
+    if handler is not None:
+        out.append(f"{query}")
+        out.append(f"→ {handler}()")
+        chain.append({"step": query, "handler": handler, "kind": "route"})
     if handler:
         if route_file and route_file in idx.files:
             effects.extend(idx.files[route_file].side_effects)
@@ -691,7 +816,7 @@ def cmd_callgraph(args) -> int:
                 out.append(f"  ↳ referenced at {ref.file}:{ref.line}: {ref.text[:100]}  [{precision_label(ref.analyzer, ref.precision, ref.confidence)}]")
                 chain.append({"reference": {"file": ref.file, "line": ref.line, "text": ref.text[:100], "analyzer": ref.analyzer, "precision": ref.precision, "confidence": ref.confidence}})
     else:
-        syms = idx.find_symbol(query)
+        syms = idx.find_symbol(query) or idx.find_symbol_fuzzy(query)
         if syms:
             out.append(f"{query} defined at {syms[0].file}:{syms[0].line}")
             for ref in idx.references_to(query)[:20]:
@@ -2352,6 +2477,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.set_defaults(func=cmd_api)
     pf = sub.add_parser("preflight", parents=[common]); pf.add_argument("file")
     pf.set_defaults(func=cmd_preflight)
+    ro = sub.add_parser("routes", parents=[common], help="List URL routes mapped to handler symbols (framework-aware)")
+    ro.add_argument("target", nargs="?", help="Optional file or directory to limit the scan to")
+    ro.add_argument("--filter", help="Substring-match the path")
+    ro.add_argument("--method", help="Filter to a single HTTP method (GET, POST, …)")
+    ro.set_defaults(func=cmd_routes)
     wt = sub.add_parser("watch")
     wt.add_argument("--debounce", type=float, default=0.5, help="Coalesce file events within this many seconds (default: 0.5)")
     wt.set_defaults(func=cmd_watch)

@@ -6,13 +6,14 @@
 
 <p align="center"><strong>Symbol-level codebase intelligence for coding agents.</strong></p>
 
-Codeward gives your agent commands the shell can't: "where is this defined?", "who calls it?", "which tests cover it?", "what changed at the symbol level?", "what would break if I edit this file?". It indexes your repo with tree-sitter / Python AST.
+Codeward gives your agent commands the shell can't: "where is this defined?", "who calls it?", "which tests cover it?", "what changed at the symbol level?", "what would break if I edit this file?", "what handles this URL?". It indexes your repo with tree-sitter / Python AST.
 
 ```text
 What does this repo do?            →  codeward map
 Where is APIRouter defined?        →  codeward symbol APIRouter
 Show me Engine.ServeHTTP's body    →  codeward slice "(*Engine).ServeHTTP"
 What calls this method?            →  codeward refs ServeHTTP
+What handles POST /api/users?      →  codeward routes --filter /api/users
 What tests cover this file?        →  codeward tests-for fastapi/routing.py
 Who wrote this method?             →  codeward blame APIRoute.get_route_handler
 What changed at the symbol level?  →  codeward sdiff --base HEAD~1
@@ -20,7 +21,12 @@ What's the public API of this?     →  codeward api fastapi/applications.py
 What could break if I edit this?   →  codeward preflight fastapi/routing.py  (auto-injected on Edit/Write)
 ```
 
-Headline feature: **[preflight context injection](#preflight-blast-radius-context-before-edits)** — dependents, tests, side-effects, blast-radius pushed into the model *before* an Edit/Write call. Codeward composes with [RTK](https://github.com/rtk-ai/rtk) rather than replacing it ([details](#how-it-composes-with-rtk)).
+Two headline features:
+
+- **[Preflight context injection](#preflight-blast-radius-context-before-edits)** — dependents, tests, side-effects, blast-radius, and matching routes pushed into the model *before* an Edit/Write call.
+- **[Framework-aware routes](#routes-framework-aware-url--handler-mapping)** — URL patterns → handler symbols across FastAPI, Flask, Django, Express, NestJS, Spring, Gin, Actix, Rails, Laravel, ASP.NET Core.
+
+Codeward composes with [RTK](https://github.com/rtk-ai/rtk) rather than replacing it ([details](#how-it-composes-with-rtk)).
 
 ## When not to use this
 
@@ -32,20 +38,29 @@ If budget for only one tool, install **RTK** first. Add Codeward for refactor pl
 
 ## Project status
 
-v0.4.x, **install from source**. CLI surface and JSON schema are stable across `0.4.x`.
+v0.5.x. CLI surface and JSON schema are stable across `0.5.x`.
 
-- **Solid:** core commands (`map`, `read`, `search`, `symbol`, `slice`, `refs`, `tests-for`, `impact`, `preflight`), SQLite index with mtime invalidation, Claude/Gemini hook adapters, `--json`, `gain` history.
+- **Solid:** core commands (`map`, `read`, `search`, `symbol`, `slice`, `refs`, `tests-for`, `impact`, `preflight`, `routes`), SQLite index with mtime invalidation, Claude/Gemini hook adapters, MCP server, `--json`, `gain` history.
 - **Maturity varies by language:** `callgraph`, `blame`, `sdiff`, `api`, `review --security` — see the [Commands](#commands) table.
 
 ## Install
 
 ```bash
-git clone https://github.com/osirishorus/codeward.git
-pipx install --editable ./codeward     # recommended
-# or: cd codeward && pip install -e .
+pipx install codeward          # recommended — isolated, on PATH
+# or
+pip install --user codeward
+# or
+npx codeward init              # Node/JS users: wrapper bootstraps via pipx/pip
 ```
 
-Python ≥ 3.11. Tree-sitter grammars (Go, Rust, TS/JS, Java, Ruby, PHP, C#) and `watchdog` pulled in by default. PyPI release in v0.5 — watch [releases](https://github.com/osirishorus/codeward/releases).
+Python ≥ 3.11 (and Node ≥ 18 if using the `npx` wrapper). Tree-sitter grammars for **17 languages** (Python, Go, Rust, TS/JS, Java, Ruby, PHP, C#, C, C++, Kotlin, Swift, Scala, Bash, Lua, Elixir) and `watchdog` pulled in by default.
+
+From source (for hacking):
+
+```bash
+git clone https://github.com/osirishorus/codeward.git
+pipx install --editable ./codeward
+```
 
 ## Quick start
 
@@ -92,6 +107,30 @@ When the Edit/Write hook is installed, Codeward injects a compact `additionalCon
 
 Payload contents are configurable via `.codeward/config.toml` (custom side-effect rules, ignored dirs, extra test paths). End-to-end transcript: [docs/BENCHMARKS.md](docs/BENCHMARKS.md#editwrite-benchmark--preflight-hook-in-action).
 
+## Routes: framework-aware URL → handler mapping
+
+`codeward routes` extracts URL routes from the supported web frameworks and links each route to the symbol that handles it:
+
+```text
+$ codeward routes --method GET
+# Codeward routes (3)
+  GET  /api/users/{id}   →  read_user             (api/users.py:42)
+  GET  /api/health       →  health_check          (api/health.py:8)
+  GET  /                 →  index_handler         (app/views.py:15)
+```
+
+Recognized: **FastAPI**, **Flask** / **Starlette** / **Sanic**, **Django**, **Express** / **Koa** / **Hono**, **NestJS**, **Spring** (Java/Kotlin), **Gin** / **Echo** / **Chi** (Go), **Actix-web** (Rust), **Sinatra** / **Rails** (Ruby), **Laravel** (PHP), **ASP.NET Core** (C#).
+
+Routes also show up in `preflight` output when the file you're editing declares them, and `callgraph` accepts route patterns like `POST /api/users` directly:
+
+```bash
+codeward callgraph "POST /api/users"
+codeward routes --filter /admin --method POST
+codeward routes src/api/                  # limit to one directory
+```
+
+Pattern-based — metaprogrammed routes (factories, dynamic registration) won't always register. Open an issue with a sample if you hit a gap.
+
 ## Commands
 
 ### Core (load-bearing, exercised in benchmarks)
@@ -109,6 +148,7 @@ All read-only commands support `--json`.
 | `codeward tests-for <target>` | Likely covering tests | guessing |
 | `codeward impact [--changed\|<target>]` | Dependents + tests + risk | manual review |
 | `codeward preflight <file>` | "What to know before editing this" — see [above](#preflight-blast-radius-context-before-edits) | n/a |
+| `codeward routes [target]` | Framework-aware URL → handler mapping — see [above](#routes-framework-aware-url--handler-mapping) | grep across decorator files |
 | `codeward budget [target]` | Token hotspot audit + cheaper command recommendations | blind `cat`/`find` exploration |
 | `codeward pack <target>` | Budgeted context bundle for a file/dir/symbol/query | dumping many files into context |
 | `codeward diff-pack [--changed] [--base <ref>]` | Budgeted changed-code bundle for branch understanding/review | raw diff spelunking |

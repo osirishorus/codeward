@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codeward"
-version = "0.4.0"
+version = "0.5.0"
 description = "Semantic codebase intelligence CLI for coding agents — composes with RTK"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,6 +33,7 @@ Issues        = "https://github.com/osirishorus/codeward/issues"
 Changelog     = "https://github.com/osirishorus/codeward/blob/main/CHANGELOG.md"
 dependencies = [
   "tree-sitter>=0.23",
+  # Core code languages with first-class symbol extraction.
   "tree-sitter-go>=0.23",
   "tree-sitter-rust>=0.23",
   "tree-sitter-typescript>=0.23",
@@ -41,6 +42,18 @@ dependencies = [
   "tree-sitter-ruby>=0.23",
   "tree-sitter-php>=0.23",
   "tree-sitter-c-sharp>=0.23",
+  # Extended language coverage. Each grammar is imported lazily inside
+  # analyzers/treesitter.py — if any individual import fails (wheel missing
+  # for the platform, ABI mismatch), that language falls back to regex
+  # while the rest keep working.
+  "tree-sitter-c>=0.23",
+  "tree-sitter-cpp>=0.23",
+  "tree-sitter-kotlin>=1.0",
+  "tree-sitter-swift>=0.7",
+  "tree-sitter-scala>=0.23",
+  "tree-sitter-bash>=0.23",
+  "tree-sitter-lua>=0.2",
+  "tree-sitter-elixir>=0.3",
   # Watchdog enables `codeward watch`, a foreground re-indexer that
   # incrementally updates the SQLite cache on file events. Without it, watch
   # falls back to 2-second mtime polling.

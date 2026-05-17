@@ -4,6 +4,35 @@ All notable changes to Codeward will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning after `0.1.0`.
 
+## [0.5.0] - 2026-05-16
+
+Focused on reach: more languages, more frameworks, easier install, and three real bug fixes.
+
+### Added
+
+- **`codeward routes [target]`** — framework-aware URL → handler mapping. Recognizes **FastAPI**, **Flask** / **Starlette** / **Sanic**, **Django**, **Express** / **Koa** / **Hono**, **NestJS**, **Spring** (Java/Kotlin), **Gin** / **Echo** / **Chi** (Go), **Actix-web** (Rust), **Sinatra** / **Rails** (Ruby), **Laravel** (PHP), **ASP.NET Core** (C#). Routes also surface in `preflight` payloads for files that declare them, and `callgraph` accepts route patterns directly.
+- **Extended language coverage** — added tree-sitter analyzers for **C**, **C++**, **Kotlin**, **Swift**, **Scala**, **Bash**, **Lua**, **Elixir**. Total: 17 languages with first-class symbol extraction.
+- **npm wrapper** — `npx codeward` and `npm i -g codeward` now work. The wrapper bootstraps via `pipx` (preferred) or `pip --user`, then forwards to the Python CLI. Node ≥ 18, Python ≥ 3.11.
+- **`find_symbol_fuzzy`** — case-insensitive / suffix / substring fallback used by `symbol`, `slice`, `blame`, `refs`, `callgraph` when the strict match returns nothing. Means `codeward symbol initdb` finds `initDB`.
+
+### Changed
+
+- **`gain` output** — banner + date range + unique-command count + per-row mini-meter + ANSI color (auto-disabled when `NO_COLOR` is set or stdout isn't a TTY). Same data, much more scannable.
+- **References track column** — `Reference` now carries a `column` field; `cmd_refs` filters definitions vs call sites by analyzer kind, so legitimate calls on the same line as a definition (single-line Java/PHP/C# bodies, recursive Python defs) are no longer dropped.
+- **README** — install via PyPI / npx as the primary path; the routes feature and broader language coverage are foregrounded.
+
+### Fixed
+
+- **`codeward review --changed` crash** — `tokenize.TokenizeError` referenced the wrong name; should be `tokenize.TokenError`. Also catches `IndentationError` / `SyntaxError` from the fallback strip path.
+- **Symbol lookup too strict** — `symbol`, `refs`, `blame` were returning empty on common camelCase / underscore variants. Fuzzy fallback catches these.
+- **Refs over-suppressed** — when a definition and a call site shared a line, the call was filtered out. Fix uses analyzer provenance (tree-sitter / python_ast refs are already syntax-aware) instead of pure (file, line) matching.
+
+### Verified on
+
+- All 99 tests pass against the new analyzers and route extractor.
+- Smoke-tested route extraction across 11 frameworks with synthetic samples.
+- Smoke-tested symbol extraction across 8 new language samples (C, C++, Kotlin, Swift, Scala, Bash, Lua, Elixir).
+
 ## [0.3.0] - 2026-05-08
 
 Phases B/C/D landed. Codeward now ships a complete symbol-level toolchain that lives entirely outside RTK's lane.

@@ -5,8 +5,13 @@ cannot be imported, the regex-based fallback in index.py:analyze_generic stays
 in effect.
 
 Languages with first-class extraction: Go, Rust, TypeScript, JavaScript, Java,
-Ruby, PHP, C#. Each emits Symbols matching the same shape as the Python
-analyzer: name, kind, file, line, end_line, signature.
+Ruby, PHP, C#, C, C++, Kotlin, Swift, Scala, Bash, Lua, Elixir. Each emits
+Symbols matching the same shape as the Python analyzer: name, kind, file,
+line, end_line, signature.
+
+Each grammar is imported lazily — if a wheel is missing for the platform,
+that single language degrades to regex while every other language keeps
+working.
 """
 from __future__ import annotations
 
@@ -14,52 +19,94 @@ from pathlib import Path
 
 try:
     from tree_sitter import Language, Parser
-    import tree_sitter_go
-    import tree_sitter_rust
-    import tree_sitter_typescript
-    import tree_sitter_javascript
-    import tree_sitter_java
-    import tree_sitter_ruby
-    import tree_sitter_php
-    import tree_sitter_c_sharp
     HAS_TREE_SITTER = True
 except ImportError:
     HAS_TREE_SITTER = False
 
 
 _PARSERS_CACHE: dict[str, "Parser"] = {}
+# Tracks languages we've already failed to load so we don't keep retrying the
+# import on every file. Maps lang → True (failed) or absent.
+_PARSER_LOAD_FAILED: dict[str, bool] = {}
+
+
+def _load_language(lang: str):
+    """Import the relevant tree-sitter package on demand and return its language
+    object, or None if the package isn't installed. Per-language failure is
+    cached so we don't pay the ImportError cost on every file."""
+    if _PARSER_LOAD_FAILED.get(lang):
+        return None
+    try:
+        if lang == "go":
+            import tree_sitter_go as m
+            return m.language()
+        if lang == "rust":
+            import tree_sitter_rust as m
+            return m.language()
+        if lang == "typescript":
+            import tree_sitter_typescript as m
+            return m.language_typescript()
+        if lang == "tsx":
+            import tree_sitter_typescript as m
+            return m.language_tsx()
+        if lang == "javascript":
+            import tree_sitter_javascript as m
+            return m.language()
+        if lang == "java":
+            import tree_sitter_java as m
+            return m.language()
+        if lang == "ruby":
+            import tree_sitter_ruby as m
+            return m.language()
+        if lang == "php":
+            import tree_sitter_php as m
+            return m.language_php()
+        if lang == "csharp":
+            import tree_sitter_c_sharp as m
+            return m.language()
+        if lang == "c":
+            import tree_sitter_c as m
+            return m.language()
+        if lang == "cpp":
+            import tree_sitter_cpp as m
+            return m.language()
+        if lang == "kotlin":
+            import tree_sitter_kotlin as m
+            return m.language()
+        if lang == "swift":
+            import tree_sitter_swift as m
+            return m.language()
+        if lang == "scala":
+            import tree_sitter_scala as m
+            return m.language()
+        if lang == "bash":
+            import tree_sitter_bash as m
+            return m.language()
+        if lang == "lua":
+            import tree_sitter_lua as m
+            return m.language()
+        if lang == "elixir":
+            import tree_sitter_elixir as m
+            return m.language()
+    except Exception:
+        _PARSER_LOAD_FAILED[lang] = True
+    return None
 
 
 def _get_parser(lang: str):
     """Lazily build and cache parsers. Returns None if the language isn't supported
-    or tree-sitter isn't installed."""
+    or the grammar wheel isn't installed."""
     if not HAS_TREE_SITTER:
         return None
     if lang in _PARSERS_CACHE:
         return _PARSERS_CACHE[lang]
+    obj = _load_language(lang)
+    if obj is None:
+        return None
     try:
-        if lang == "go":
-            obj = tree_sitter_go.language()
-        elif lang == "rust":
-            obj = tree_sitter_rust.language()
-        elif lang == "typescript":
-            obj = tree_sitter_typescript.language_typescript()
-        elif lang == "tsx":
-            obj = tree_sitter_typescript.language_tsx()
-        elif lang == "javascript":
-            obj = tree_sitter_javascript.language()
-        elif lang == "java":
-            obj = tree_sitter_java.language()
-        elif lang == "ruby":
-            obj = tree_sitter_ruby.language()
-        elif lang == "php":
-            obj = tree_sitter_php.language_php()
-        elif lang == "csharp":
-            obj = tree_sitter_c_sharp.language()
-        else:
-            return None
         parser = Parser(Language(obj))
     except Exception:
+        _PARSER_LOAD_FAILED[lang] = True
         return None
     _PARSERS_CACHE[lang] = parser
     return parser
@@ -76,6 +123,14 @@ def language_for_path(path: str) -> str | None:
         ".rb": "ruby",
         ".php": "php",
         ".cs": "csharp",
+        ".c": "c", ".h": "c",
+        ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+        ".kt": "kotlin", ".kts": "kotlin",
+        ".swift": "swift",
+        ".scala": "scala", ".sc": "scala",
+        ".sh": "bash", ".bash": "bash",
+        ".lua": "lua",
+        ".ex": "elixir", ".exs": "elixir",
     }.get(suffix)
 
 
@@ -128,6 +183,20 @@ def analyze_treesitter(info, text: str) -> bool:
         _extract_php(tree.root_node, src, info, Symbol)
     elif lang == "csharp":
         _extract_csharp(tree.root_node, src, info, Symbol)
+    elif lang in ("c", "cpp"):
+        _extract_c_family(tree.root_node, src, info, Symbol, cpp=(lang == "cpp"))
+    elif lang == "kotlin":
+        _extract_kotlin(tree.root_node, src, info, Symbol)
+    elif lang == "swift":
+        _extract_swift(tree.root_node, src, info, Symbol)
+    elif lang == "scala":
+        _extract_scala(tree.root_node, src, info, Symbol)
+    elif lang == "bash":
+        _extract_bash(tree.root_node, src, info, Symbol)
+    elif lang == "lua":
+        _extract_lua(tree.root_node, src, info, Symbol)
+    elif lang == "elixir":
+        _extract_elixir(tree.root_node, src, info, Symbol)
     else:
         return False
     _link_methods_to_classes(info)
@@ -428,6 +497,316 @@ def _extract_php(root, src: bytes, info, Symbol) -> None:
                 visit(c)
 
     visit(root)
+
+
+def _extract_c_family(root, src: bytes, info, Symbol, *, cpp: bool) -> None:
+    """C / C++. Handles top-level function definitions, struct/union/class
+    (C++), enum, and typedef. C++ member functions inside a class body get
+    Class.method names; out-of-class definitions (`Class::method`) also get
+    Class.method names so they group together."""
+    def visit(node) -> None:
+        for c in node.children:
+            t = c.type
+            if t == "function_definition":
+                declarator = _field(c, "declarator")
+                name = _function_declarator_name(declarator, src) if declarator else None
+                if name:
+                    line, end = _line_range(c)
+                    # name may be 'Class::method' for out-of-class defs.
+                    if cpp and "::" in name:
+                        cls, _, meth = name.rpartition("::")
+                        full = f"{cls}.{meth}"
+                        info.symbols.append(Symbol(full, "method", info.path, line, [], _signature_lines(c, src), end))
+                    else:
+                        info.symbols.append(Symbol(name, "function", info.path, line, [], _signature_lines(c, src), end))
+            elif t in ("struct_specifier", "union_specifier", "class_specifier"):
+                name_node = _field(c, "name")
+                if name_node:
+                    cls_name = _txt(name_node, src)
+                    line, end = _line_range(c)
+                    method_names: list[str] = []
+                    body = _field(c, "body")
+                    if body:
+                        for member in body.children:
+                            if member.type == "function_definition":
+                                declarator = _field(member, "declarator")
+                                mname = _function_declarator_name(declarator, src) if declarator else None
+                                if mname:
+                                    short = mname.split("::")[-1]
+                                    method_names.append(short)
+                                    ml, me = _line_range(member)
+                                    info.symbols.append(Symbol(f"{cls_name}.{short}", "method", info.path, ml, [], _signature_lines(member, src), me))
+                    kind = {
+                        "class_specifier": "class",
+                        "struct_specifier": "struct",
+                        "union_specifier": "union",
+                    }.get(t, "class")
+                    info.symbols.append(Symbol(cls_name, kind, info.path, line, method_names, _signature_lines(c, src), end))
+            elif t == "enum_specifier":
+                name_node = _field(c, "name")
+                if name_node:
+                    line, end = _line_range(c)
+                    info.symbols.append(Symbol(_txt(name_node, src), "enum", info.path, line, [], _signature_lines(c, src), end))
+            elif t in ("namespace_definition", "linkage_specification", "preproc_if", "preproc_ifdef"):
+                visit(c)
+
+    visit(root)
+
+
+def _function_declarator_name(declarator, src: bytes) -> str | None:
+    """Walk a (possibly pointer-wrapped) C/C++ declarator to its inner name.
+    `int *foo()` → 'foo'; `Class::method()` → 'Class::method'; `*foo()` → 'foo'."""
+    if declarator is None:
+        return None
+    if declarator.type == "function_declarator":
+        inner = _field(declarator, "declarator")
+        if inner is None:
+            return None
+        if inner.type in ("identifier", "field_identifier", "type_identifier"):
+            return _txt(inner, src)
+        if inner.type == "qualified_identifier":
+            return _txt(inner, src)
+        if inner.type in ("pointer_declarator", "reference_declarator"):
+            return _function_declarator_name(inner, src)
+        return _txt(inner, src)
+    if declarator.type in ("pointer_declarator", "reference_declarator"):
+        return _function_declarator_name(_field(declarator, "declarator"), src)
+    return None
+
+
+def _extract_kotlin(root, src: bytes, info, Symbol) -> None:
+    """Kotlin: function_declaration, class_declaration, object_declaration.
+    Methods inside a class body are emitted as Class.method.
+
+    Newer tree-sitter-kotlin (1.x) emits bare `identifier` rather than
+    `simple_identifier` for declaration names — we accept either.
+    """
+    def first_name(node):
+        # Walk immediate children and return the first identifier-like node.
+        for c in node.children:
+            if c.type in ("identifier", "simple_identifier", "type_identifier"):
+                return c
+        return None
+
+    def visit(node, parent: str | None = None) -> None:
+        for c in node.children:
+            t = c.type
+            if t in ("class_declaration", "object_declaration", "interface_declaration"):
+                name_node = first_name(c)
+                if name_node is None:
+                    continue
+                cls_name = _txt(name_node, src)
+                line, end = _line_range(c)
+                method_names: list[str] = []
+                body = _named_child(c, "class_body") or _named_child(c, "enum_class_body")
+                if body:
+                    for member in body.children:
+                        if member.type == "function_declaration":
+                            mname_node = first_name(member)
+                            if mname_node:
+                                m_text = _txt(mname_node, src)
+                                method_names.append(m_text)
+                                ml, me = _line_range(member)
+                                info.symbols.append(Symbol(f"{cls_name}.{m_text}", "method", info.path, ml, [], _signature_lines(member, src), me))
+                kind = "interface" if t == "interface_declaration" else ("object" if t == "object_declaration" else "class")
+                info.symbols.append(Symbol(cls_name, kind, info.path, line, method_names, _signature_lines(c, src), end))
+            elif t == "function_declaration" and parent is None:
+                name_node = first_name(c)
+                if name_node:
+                    line, end = _line_range(c)
+                    info.symbols.append(Symbol(_txt(name_node, src), "function", info.path, line, [], _signature_lines(c, src), end))
+
+    visit(root)
+
+
+def _extract_swift(root, src: bytes, info, Symbol) -> None:
+    """Swift: class_declaration, struct_declaration, enum_declaration,
+    protocol_declaration, function_declaration. Members defined inside a
+    type body get Type.member names."""
+    def member_name(member):
+        # Swift methods carry the identifier as a 'name' field on some tree-sitter
+        # builds and as a 'simple_identifier' child on others.
+        name_node = _field(member, "name") or _named_child(member, "simple_identifier")
+        return _txt(name_node, src) if name_node else None
+
+    def visit(node) -> None:
+        for c in node.children:
+            t = c.type
+            if t in ("class_declaration", "struct_declaration", "enum_declaration", "protocol_declaration", "extension_declaration"):
+                name_node = _field(c, "name") or _named_child(c, "type_identifier") or _named_child(c, "user_type")
+                if name_node is None:
+                    continue
+                cls_name = _txt(name_node, src)
+                line, end = _line_range(c)
+                method_names: list[str] = []
+                # Class body type differs across swift grammar versions.
+                body = (
+                    _field(c, "body")
+                    or _named_child(c, "class_body")
+                    or _named_child(c, "struct_body")
+                    or _named_child(c, "enum_class_body")
+                )
+                if body:
+                    for member in body.children:
+                        if member.type in ("function_declaration", "init_declaration", "deinit_declaration"):
+                            mname = member_name(member) or ("init" if member.type == "init_declaration" else None)
+                            if mname:
+                                method_names.append(mname)
+                                ml, me = _line_range(member)
+                                info.symbols.append(Symbol(f"{cls_name}.{mname}", "method", info.path, ml, [], _signature_lines(member, src), me))
+                kind = {
+                    "protocol_declaration": "interface",
+                    "enum_declaration": "enum",
+                    "struct_declaration": "class",
+                    "extension_declaration": "extension",
+                }.get(t, "class")
+                info.symbols.append(Symbol(cls_name, kind, info.path, line, method_names, _signature_lines(c, src), end))
+            elif t == "function_declaration":
+                name = member_name(c)
+                if name:
+                    line, end = _line_range(c)
+                    info.symbols.append(Symbol(name, "function", info.path, line, [], _signature_lines(c, src), end))
+
+    visit(root)
+
+
+def _extract_scala(root, src: bytes, info, Symbol) -> None:
+    """Scala: class_definition, object_definition, trait_definition, function_definition."""
+    def visit(node) -> None:
+        for c in node.children:
+            t = c.type
+            if t in ("class_definition", "object_definition", "trait_definition"):
+                name_node = _field(c, "name")
+                if name_node is None:
+                    continue
+                cls_name = _txt(name_node, src)
+                line, end = _line_range(c)
+                method_names: list[str] = []
+                body = _field(c, "body") or _named_child(c, "template_body")
+                if body:
+                    for member in body.children:
+                        if member.type in ("function_definition", "function_declaration"):
+                            mname_node = _field(member, "name")
+                            if mname_node:
+                                m_text = _txt(mname_node, src)
+                                method_names.append(m_text)
+                                ml, me = _line_range(member)
+                                info.symbols.append(Symbol(f"{cls_name}.{m_text}", "method", info.path, ml, [], _signature_lines(member, src), me))
+                kind = {"object_definition": "object", "trait_definition": "interface"}.get(t, "class")
+                info.symbols.append(Symbol(cls_name, kind, info.path, line, method_names, _signature_lines(c, src), end))
+            elif t in ("function_definition", "function_declaration"):
+                name_node = _field(c, "name")
+                if name_node:
+                    line, end = _line_range(c)
+                    info.symbols.append(Symbol(_txt(name_node, src), "function", info.path, line, [], _signature_lines(c, src), end))
+            elif t in ("package_clause", "package_object"):
+                visit(c)
+
+    visit(root)
+
+
+def _extract_bash(root, src: bytes, info, Symbol) -> None:
+    """Bash: function_definition. Single namespace; no classes."""
+    def visit(node) -> None:
+        for c in node.children:
+            if c.type == "function_definition":
+                name_node = _field(c, "name") or _named_child(c, "word")
+                if name_node:
+                    line, end = _line_range(c)
+                    info.symbols.append(Symbol(_txt(name_node, src), "function", info.path, line, [], _signature_lines(c, src), end))
+            elif c.type == "compound_statement":
+                visit(c)
+
+    visit(root)
+
+
+def _extract_lua(root, src: bytes, info, Symbol) -> None:
+    """Lua: function_declaration (top-level), function_definition (assigned).
+    Also handles `function M.foo()` / `function M:foo()` colon syntax — these
+    are emitted as `function` (not `method`) because Lua has no true classes;
+    `M` is a table. `cmd_read` would otherwise hide every dotted-name function
+    behind a non-existent class."""
+    def visit(node) -> None:
+        for c in node.children:
+            if c.type == "function_declaration":
+                # name may be 'identifier' or 'dot_index_expression' / 'method_index_expression'
+                name_node = _field(c, "name")
+                if name_node is None:
+                    continue
+                raw_name = _txt(name_node, src).replace(":", ".")
+                line, end = _line_range(c)
+                info.symbols.append(Symbol(raw_name, "function", info.path, line, [], _signature_lines(c, src), end))
+            elif c.type == "variable_declaration" or c.type == "assignment_statement":
+                # local foo = function(...) ... end  →  capture name + range
+                value = _field(c, "value")
+                if value and value.type == "function_definition":
+                    target = _field(c, "name")
+                    if target:
+                        name = _txt(target, src)
+                        line, end = _line_range(c)
+                        info.symbols.append(Symbol(name, "function", info.path, line, [], _signature_lines(c, src), end))
+            elif c.type in ("if_statement", "do_statement"):
+                visit(c)
+
+    visit(root)
+
+
+def _extract_elixir(root, src: bytes, info, Symbol) -> None:
+    """Elixir: module definitions (`defmodule Foo do ... end`) and function
+    clauses (`def foo(...)` / `defp foo(...)`).
+
+    Tree-sitter-elixir represents these as `call` nodes with a target identifier,
+    not dedicated `module_definition` / `function_definition` types. We walk
+    calls and recognize the relevant atoms by name.
+    """
+    def call_target(node) -> str | None:
+        target = _field(node, "target")
+        if target is None:
+            return None
+        return _txt(target, src)
+
+    def first_arg_atom(node) -> str | None:
+        args = _field(node, "arguments")
+        if args is None:
+            for child in node.children:
+                if child.type == "arguments":
+                    args = child
+                    break
+        if args is None:
+            return None
+        for arg in args.children:
+            if arg.type == "alias":
+                return _txt(arg, src)
+            if arg.type == "identifier":
+                return _txt(arg, src)
+            if arg.type == "call":
+                inner = _field(arg, "target")
+                if inner is not None:
+                    return _txt(inner, src)
+        return None
+
+    def visit(node, parent: str | None) -> None:
+        for c in node.children:
+            if c.type == "call":
+                target = call_target(c)
+                if target == "defmodule":
+                    mod_name = first_arg_atom(c)
+                    if mod_name:
+                        line, end = _line_range(c)
+                        info.symbols.append(Symbol(mod_name, "module", info.path, line, [], _signature_lines(c, src), end))
+                        visit(c, mod_name)
+                    continue
+                if target in ("def", "defp", "defmacro", "defmacrop"):
+                    fn_name = first_arg_atom(c)
+                    if fn_name:
+                        line, end = _line_range(c)
+                        full = f"{parent}.{fn_name}" if parent else fn_name
+                        kind = "method" if parent else "function"
+                        info.symbols.append(Symbol(full, kind, info.path, line, [], _signature_lines(c, src), end))
+                    continue
+            visit(c, parent)
+
+    visit(root, None)
 
 
 def _extract_csharp(root, src: bytes, info, Symbol) -> None:

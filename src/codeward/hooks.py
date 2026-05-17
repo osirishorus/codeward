@@ -310,14 +310,60 @@ def _read_history(path: Path) -> list[dict]:
     return rows
 
 
-_RULE_HEAVY = "═" * 60
-_RULE_LIGHT = "─" * 60
+_RULE_HEAVY = "═" * 64
+_RULE_LIGHT = "─" * 64
 
 
-def _meter(pct: float, width: int = 24) -> str:
+def _color_enabled() -> bool:
+    """Honor NO_COLOR and TERM=dumb; otherwise color when stdout is a TTY.
+    Tests/MCP capture stdout via redirect, where isatty()==False — colors stay
+    off there automatically."""
+    import os
+    import sys
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return getattr(sys.stdout, "isatty", lambda: False)()
+
+
+def _c(text: str, code: str) -> str:
+    """ANSI-wrap when color is enabled; pass-through otherwise."""
+    if not _color_enabled():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _bold(text: str) -> str:
+    return _c(text, "1")
+
+
+def _dim(text: str) -> str:
+    return _c(text, "2")
+
+
+def _color_pct(pct: float) -> str:
+    """Pick a color band for a savings percentage. Green ≥70, yellow ≥40,
+    red below. Keeps the meter readable at a glance."""
+    if pct >= 70:
+        return "32"  # green
+    if pct >= 40:
+        return "33"  # yellow
+    return "31"      # red
+
+
+def _meter(pct: float, width: int = 28) -> str:
     pct = max(0.0, min(100.0, pct))
     filled = int(round(width * pct / 100.0))
-    return "█" * filled + "░" * (width - filled)
+    bar = "█" * filled + "░" * (width - filled)
+    return _c(bar, _color_pct(pct))
+
+
+def _mini_meter(pct: float, width: int = 10) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round(width * pct / 100.0))
+    bar = "▇" * filled + "·" * (width - filled)
+    return _c(bar, _color_pct(pct))
 
 
 def _is_synthetic_original(s: str) -> bool:
@@ -327,23 +373,46 @@ def _is_synthetic_original(s: str) -> bool:
 
 
 def _format_gain_row(r: dict, idx: int) -> list[str]:
-    """Format a single history row as 2-3 indented lines under the 'Top savings' header."""
+    """Render one history row as a compact 2- or 3-line block.
+
+    Layout:
+        ` 1. original-command`
+        `    → rewritten-command`               (omitted for direct/synthetic rows)
+        `    ▇▇▇▇▇▇▇▇·· 81.1%  raw 6,005 → cs 1,132  (saved 4,873)`
+    """
     raw = r.get("raw_tokens", 0)
     out_t = r.get("output_tokens", 0)
     saved = r.get("saved_tokens", 0)
     pct = (saved / raw * 100) if raw else 0
     _, original, rewritten = parse_command_field(r.get("command", ""))
-    lines = []
-    head = f" {idx:>2}. "
+    lines: list[str] = []
+    head = _dim(f" {idx:>2}. ")
     if original != rewritten and not _is_synthetic_original(original):
         lines.append(f"{head}{original}")
-        lines.append(f"       → {rewritten}")
+        lines.append(f"     {_dim('→')} {_bold(rewritten)}")
     else:
-        lines.append(f"{head}{rewritten}")
+        lines.append(f"{head}{_bold(rewritten)}")
+    pct_str = _c(f"{pct:>5.1f}%", _color_pct(pct))
     lines.append(
-        f"     raw {raw:>7,} → cs {out_t:>6,}   saved {saved:>7,} ({pct:>5.1f}%)"
+        f"     {_mini_meter(pct)}  {pct_str}  "
+        + _dim(f"raw {raw:>7,} → cs {out_t:>6,}")
+        + f"  saved {_bold(format(saved, ',').rjust(7))}"
     )
     return lines
+
+
+def _format_date_range(rows: list[dict]) -> str:
+    """Compact 'YYYY-MM-DD → YYYY-MM-DD' from the oldest/newest ts in `rows`.
+    Returns '' if no row has a timestamp."""
+    import datetime as _dt
+    stamps = [r.get("ts") for r in rows if isinstance(r.get("ts"), (int, float))]
+    if not stamps:
+        return ""
+    oldest = _dt.datetime.fromtimestamp(min(stamps)).strftime("%Y-%m-%d")
+    newest = _dt.datetime.fromtimestamp(max(stamps)).strftime("%Y-%m-%d")
+    if oldest == newest:
+        return oldest
+    return f"{oldest} → {newest}"
 
 
 def gain(root: Path, *, scope: str = "global") -> str:
@@ -383,18 +452,29 @@ def gain(root: Path, *, scope: str = "global") -> str:
     total_raw = sum(r.get("raw_tokens", 0) for r in rows)
     total_out = sum(r.get("output_tokens", 0) for r in rows)
     pct = (saved / total_raw * 100) if total_raw else 0
+    avg_saved = saved // len(rows) if rows else 0
+    unique_commands = len({
+        parse_command_field(r.get("command", ""))[2] for r in rows
+    })
+    date_range = _format_date_range(rows)
+
     top = sorted(rows, key=lambda r: r.get("saved_tokens", 0), reverse=True)[:8]
 
+    pct_color = _color_pct(pct)
+    title = _bold(f"Codeward · token savings · {scope_label}")
+    sub = _dim(f"{len(rows):,} commands · {unique_commands:,} unique" + (f" · {date_range}" if date_range else ""))
+
     out = [
-        f"Codeward token savings — {scope_label} ({len(rows)} commands tracked)",
-        _RULE_HEAVY,
-        f"  Raw tokens       {total_raw:>10,}",
-        f"  Output tokens    {total_out:>10,}",
-        f"  Tokens saved     {saved:>10,}   ({pct:.1f}%)",
-        f"  Efficiency       {_meter(pct)} {pct:>5.1f}%",
+        title,
+        sub,
+        _dim(_RULE_HEAVY),
+        f"  Raw tokens      {_dim(f'{total_raw:>12,}')}",
+        f"  Output tokens   {_dim(f'{total_out:>12,}')}",
+        f"  Tokens saved    " + _c(f"{saved:>12,}", pct_color) + _dim(f"   (avg {avg_saved:,}/cmd)"),
+        f"  Efficiency      {_meter(pct)} " + _c(f"{pct:>5.1f}%", pct_color),
         "",
-        "Top savings",
-        _RULE_LIGHT,
+        _bold("Top savings"),
+        _dim(_RULE_LIGHT),
     ]
     for i, r in enumerate(top, start=1):
         out.extend(_format_gain_row(r, i))

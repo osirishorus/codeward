@@ -166,6 +166,26 @@ def create_server():
         plus a suggested pytest command."""
         return _run(_cli.cmd_tests_for, _ns(target=target))
 
+    # ---- HTTP routes (framework-aware) ---------------------------------
+
+    @mcp.tool()
+    def codeward_routes(
+        target: str | None = None,
+        filter: str | None = None,
+        method: str | None = None,
+    ) -> dict:
+        """HTTP routes detected across the repo, mapped to handler symbols.
+
+        Recognizes FastAPI, Flask, Django, Express, NestJS, Spring, Gin/Echo,
+        Actix-web, Rails/Sinatra, Laravel, ASP.NET Core. Use this to answer
+        "what handles `POST /api/users`?" or "which routes touch this file?".
+        Pass `target` to limit to a file/directory.
+        """
+        return _run(
+            _cli.cmd_routes,
+            _ns(target=target, filter=filter, method=method),
+        )
+
     # ---- Diff / change-aware -------------------------------------------
 
     @mcp.tool()

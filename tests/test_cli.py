@@ -565,8 +565,8 @@ def test_hook_rewritten_commands_record_token_savings(sample_repo):
     )
     assert proc.returncode == 0
     result = run_cli(["gain"], sample_repo)
-    # New format: shows "1 commands tracked" + per-row "original → rewrite" + raw/cs/saved
-    assert "1 commands tracked" in result.stdout
+    # 0.5+ format: header line includes "<N> commands" + per-row "original → rewrite" + raw/cs/saved
+    assert "1 commands" in result.stdout
     assert "cat src/services/user_service.py" in result.stdout
     assert "codeward read src/services/user_service.py" in result.stdout
     assert "raw" in result.stdout and "saved" in result.stdout
@@ -1584,3 +1584,122 @@ def test_impact_flags_hotspot(sample_repo):
     assert rows[target]["hotspot"] is True
     assert rows[target]["commits_90d"] >= 4
     assert rows[target]["risk"] == "HIGH"
+
+
+# ---- 0.5.0: routes, fuzzy lookup, refs-on-same-line, tokenize crash ----
+
+
+def test_extract_routes_fastapi_flask_django(tmp_path):
+    """Framework-aware route extraction should pick up FastAPI / Flask / Django
+    declarations in a single Python file."""
+    from codeward.index import extract_routes
+    text = (
+        '@router.get("/items/{id}")\n'
+        'async def read_item(id: int):\n'
+        '    return {}\n'
+        '\n'
+        '@app.route("/login", methods=["POST"])\n'
+        'def login(): pass\n'
+        '\n'
+        'urlpatterns = [path("foo/", views.foo)]\n'
+    )
+    routes = extract_routes(text)
+    assert routes["GET /items/{id}"] == "read_item"
+    assert routes["POST /login"] == "login"
+    assert routes["ANY foo/"] == "views.foo"
+
+
+def test_extract_routes_express_and_gin(tmp_path):
+    """Express + Gin handlers across JS and Go fixtures."""
+    from codeward.index import extract_routes
+    express = "router.get('/api/users', getUsers)\napp.post('/api/users', createUser)\n"
+    gin = 'router.GET("/api/users", GetUsers)\nrouter.POST("/api/users", CreateUser)\n'
+    er, gr = extract_routes(express), extract_routes(gin)
+    assert er == {"GET /api/users": "getUsers", "POST /api/users": "createUser"}
+    assert gr == {"GET /api/users": "GetUsers", "POST /api/users": "CreateUser"}
+
+
+def test_routes_command_lists_routes(tmp_path):
+    """`codeward routes` should aggregate routes and link to handler locations."""
+    (tmp_path / "api.py").write_text(
+        '@router.get("/items/{id}")\n'
+        'async def read_item(id: int):\n'
+        '    return {}\n'
+    )
+    payload = json.loads(run_cli(["routes", "--json"], tmp_path).stdout)
+    assert payload["command"] == "routes"
+    assert payload["count"] == 1
+    r = payload["routes"][0]
+    assert r["method"] == "GET"
+    assert r["path"] == "/items/{id}"
+    assert r["handler"] == "read_item"
+    assert r["handler_location"]["file"] == "api.py"
+
+
+def test_routes_command_filter_and_method(tmp_path):
+    """--filter and --method should narrow the result set."""
+    (tmp_path / "api.py").write_text(
+        '@router.get("/items")\n'
+        'def list_items(): pass\n'
+        '@router.post("/items")\n'
+        'def create_item(): pass\n'
+        '@router.get("/users")\n'
+        'def list_users(): pass\n'
+    )
+    only_post = json.loads(run_cli(["routes", "--json", "--method", "POST"], tmp_path).stdout)
+    assert {r["handler"] for r in only_post["routes"]} == {"create_item"}
+    filtered = json.loads(run_cli(["routes", "--json", "--filter", "/users"], tmp_path).stdout)
+    assert {r["handler"] for r in filtered["routes"]} == {"list_users"}
+
+
+def test_find_symbol_fuzzy_is_case_insensitive(tmp_path):
+    """`symbol initdb` should find `initDB` via the fuzzy fallback."""
+    (tmp_path / "db.py").write_text("def initDB():\n    return None\n")
+    payload = json.loads(run_cli(["symbol", "--json", "initdb"], tmp_path).stdout)
+    names = {d["name"] for d in payload["definitions"]}
+    assert "initDB" in names
+
+
+def test_review_changed_handles_unterminated_string(sample_repo):
+    """`review --changed` used to crash with `tokenize.TokenizeError` (wrong name).
+    Construct a working-tree change containing an unterminated multiline string
+    that trips `tokenize.generate_tokens`; the command must still exit cleanly."""
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text('x = """\nunterminated multiline\n')
+    result = run_cli(["review", "--changed"], sample_repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_refs_keeps_call_site_on_definition_line(tmp_path):
+    """Single-line Java bodies put def and call on the same line.
+    Before the fix, the call site was filtered out by (file, line)-only match."""
+    pytest.importorskip("tree_sitter_java")
+    (tmp_path / "Server.java").write_text(
+        "class Server { void start() {} void run() { start(); } }\n"
+    )
+    payload = json.loads(run_cli(["refs", "--json", "Server.start"], tmp_path).stdout)
+    # The call inside `run() { start(); }` must register as a reference.
+    assert any("start()" in r["text"] for r in payload["references"]), payload
+
+
+def test_extended_language_extraction_smoke(tmp_path):
+    """Smoke test: tree-sitter analyzers report symbols for each new language
+    we added in 0.5. Each grammar is importskipped so a missing wheel skips
+    the relevant case rather than failing the suite."""
+    cases = [
+        ("tree_sitter_c", "sample.c", "int add(int a, int b) { return a + b; }\n", "add"),
+        ("tree_sitter_cpp", "sample.cpp", "class Foo { public: int bar() { return 1; } };\n", "Foo"),
+        ("tree_sitter_kotlin", "sample.kt", "fun greet(): String = \"hi\"\nclass Greeter { fun go() {} }\n", "Greeter"),
+        ("tree_sitter_swift", "sample.swift", "class Cat { func meow() -> String { return \"meow\" } }\n", "Cat"),
+        ("tree_sitter_scala", "sample.scala", "object App { def main(): Unit = () }\n", "App"),
+        ("tree_sitter_bash", "sample.sh", "foo() { echo hi; }\nbar() { foo; }\n", "foo"),
+        ("tree_sitter_lua", "sample.lua", "local M = {}\nfunction M.add(a, b) return a + b end\nreturn M\n", "M.add"),
+        ("tree_sitter_elixir", "sample.ex", "defmodule MyApp do\n  def hello, do: :world\nend\n", "MyApp"),
+    ]
+    for module_name, filename, source, expected_symbol in cases:
+        pytest.importorskip(module_name)
+        (tmp_path / filename).write_text(source)
+        read = json.loads(run_cli(["read", "--json", filename], tmp_path).stdout)
+        assert read["analyzer"] == "tree_sitter", f"{filename}: analyzer={read.get('analyzer')}"
+        names = {s["name"] for s in read.get("symbols", [])}
+        assert expected_symbol in names, f"{filename}: expected {expected_symbol} in {names}"

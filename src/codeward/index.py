@@ -13,7 +13,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java", ".rb", ".php", ".cs"}
+CODE_EXTS = {
+    ".py",
+    ".js", ".jsx", ".mjs", ".cjs",
+    ".ts", ".tsx",
+    ".rs", ".go", ".java", ".rb", ".php", ".cs",
+    # Extended language coverage (tree-sitter analyzers; regex fallback if grammar missing).
+    ".c", ".h",
+    ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+    ".kt", ".kts",
+    ".swift",
+    ".scala", ".sc",
+    ".sh", ".bash",
+    ".lua",
+    ".ex", ".exs",
+}
 # Skip files larger than this — almost always generated, vendored, or minified bundles
 # that would dominate index time without producing useful semantic information.
 MAX_INDEXABLE_BYTES = 1_500_000
@@ -50,6 +64,10 @@ class Reference:
     precision: str = "heuristic"
     confidence: str = "low"
     kind: str = "reference"
+    # Column (0-based) used to disambiguate multiple occurrences on the same
+    # line — critical when a definition and its call site share a line (common
+    # in compact Java/PHP/C# code, or `def foo(): return foo()` patterns).
+    column: int = -1
 
 
 @dataclass
@@ -349,6 +367,38 @@ class RepoIndex:
                     methods_list_match.append(sym)
         return exact + method_suffix + methods_list_match
 
+    def find_symbol_fuzzy(self, name: str, limit: int = 10) -> list[Symbol]:
+        """Loose fallback for `find_symbol`. Tries case-insensitive exact match,
+        then case-insensitive trailing-dot suffix, then case-insensitive
+        substring. Returns at most `limit` unique symbols. Empty list when
+        nothing plausible exists; callers should use this only after the
+        strict path returns empty."""
+        if not name:
+            return []
+        lower = name.lower()
+        ci_exact: list[Symbol] = []
+        ci_suffix: list[Symbol] = []
+        ci_substring: list[Symbol] = []
+        seen: set[tuple[str, str, int]] = set()
+        for info in self.files.values():
+            for sym in info.symbols:
+                sym_lower = sym.name.lower()
+                bucket: list[Symbol] | None = None
+                if sym_lower == lower:
+                    bucket = ci_exact
+                elif sym_lower.endswith("." + lower):
+                    bucket = ci_suffix
+                elif lower in sym_lower:
+                    bucket = ci_substring
+                if bucket is None:
+                    continue
+                key = (sym.name, sym.file, sym.line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                bucket.append(sym)
+        return (ci_exact + ci_suffix + ci_substring)[:limit]
+
     def callers_of(self, name: str, scope: set[str] | None = None) -> list[tuple[str, int, str]]:
         """Find lines that reference `name`. If `scope` is provided, only those
         files are scanned (typical use: limit to direct dependents). Otherwise
@@ -381,11 +431,16 @@ class RepoIndex:
                     hits.extend(ts_hits)
                     continue
             for i, line in enumerate(text.splitlines(), 1):
-                if pattern.search(line):
-                    if re.search(rf"\b(class|def|function)\s+{re.escape(target)}\b", line):
+                stripped = line.strip()
+                for m in pattern.finditer(line):
+                    # Skip the definition-line occurrence; keep call sites that
+                    # share the same line (common in single-line class bodies).
+                    col = m.start()
+                    def_match = re.search(rf"\b(class|def|function|fn|func)\s+{re.escape(target)}\b", line)
+                    if def_match and def_match.start() <= col < def_match.end():
                         continue
-                    hits.append(Reference(rel, i, line.strip()))
-        return sorted(_dedupe_refs(hits), key=lambda r: (r.file, r.line, r.text))
+                    hits.append(Reference(rel, i, stripped, column=col))
+        return sorted(_dedupe_refs(hits), key=lambda r: (r.file, r.line, r.column, r.text))
 
     def dependents_of_file(self, rel: str) -> list[str]:
         deps: set[str] = set(self._inverse_deps.get(rel, set()))
@@ -490,10 +545,12 @@ class RepoIndex:
 
 
 def _dedupe_refs(refs: list[Reference]) -> list[Reference]:
-    seen: set[tuple[str, int, str, str]] = set()
+    seen: set[tuple[str, int, int, str]] = set()
     out: list[Reference] = []
     for r in refs:
-        key = (r.file, r.line, r.text, r.kind)
+        # Include column so two references on the same line (a definition and
+        # an in-body call) don't collapse into one.
+        key = (r.file, r.line, r.column, r.kind)
         if key in seen:
             continue
         seen.add(key)
@@ -578,11 +635,11 @@ def _python_references(rel: str, text: str, name: str) -> list[Reference]:
 
         def visit_Name(self, node: ast.Name) -> None:
             if isinstance(node.ctx, ast.Load) and node.id in aliases and not self._shadowed(node.id):
-                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", "high", "name"))
+                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", "high", "name", getattr(node, "col_offset", -1)))
 
         def visit_Attribute(self, node: ast.Attribute) -> None:
             if node.attr == bare:
-                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", "high", "attribute"))
+                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", "high", "attribute", getattr(node, "col_offset", -1)))
             self.generic_visit(node)
 
     Visitor().visit(tree)
@@ -623,12 +680,20 @@ def _treesitter_references(rel: str, text: str, target: str) -> list[Reference]:
         p = getattr(node, "parent", None)
         return p.type if p is not None else ""
 
+    # `name`: PHP uses this for both declaration names and call-site names.
+    # `simple_identifier`: Kotlin/Swift/Scala variants.
+    # `scoped_identifier`: Java fully-qualified names.
     def visit(node) -> None:
-        if node.type in {"identifier", "field_identifier", "property_identifier", "constant", "type_identifier"}:
+        if node.type in {
+            "identifier", "field_identifier", "property_identifier",
+            "constant", "type_identifier", "name", "simple_identifier",
+            "scoped_identifier",
+        }:
             value = src[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
             if value == target and parent_type(node) not in definition_parent_types:
                 line = node.start_point[0] + 1
-                refs.append(Reference(rel, line, lines[line - 1].strip() if 1 <= line <= len(lines) else "", "tree_sitter", "syntax_aware", "medium", node.type))
+                col = node.start_point[1]
+                refs.append(Reference(rel, line, lines[line - 1].strip() if 1 <= line <= len(lines) else "", "tree_sitter", "syntax_aware", "medium", node.type, col))
         for child in node.children:
             visit(child)
 
@@ -707,8 +772,26 @@ def load_repo_config(root: Path) -> dict:
 
 
 def lang_for(path: str) -> str:
-    ext = Path(path).suffix
-    return {".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript", ".rs": "Rust", ".go": "Go", ".rb": "Ruby"}.get(ext, ext.lstrip(".") or "text")
+    ext = Path(path).suffix.lower()
+    return {
+        ".py": "Python",
+        ".ts": "TypeScript", ".tsx": "TypeScript",
+        ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
+        ".rs": "Rust",
+        ".go": "Go",
+        ".rb": "Ruby",
+        ".java": "Java",
+        ".php": "PHP",
+        ".cs": "C#",
+        ".c": "C", ".h": "C",
+        ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".hpp": "C++", ".hh": "C++", ".hxx": "C++",
+        ".kt": "Kotlin", ".kts": "Kotlin",
+        ".swift": "Swift",
+        ".scala": "Scala", ".sc": "Scala",
+        ".sh": "Bash", ".bash": "Bash",
+        ".lua": "Lua",
+        ".ex": "Elixir", ".exs": "Elixir",
+    }.get(ext, ext.lstrip(".") or "text")
 
 
 def analyze_file(path: str, text: str, *, custom_side_effect_rules: list[tuple] | None = None) -> FileInfo:
@@ -917,16 +1000,144 @@ def analyze_generic(info: FileInfo, text: str) -> None:
                     info.raw_imports.append((0, target))
 
 
+# Routes are normalized to "<METHOD> <path>" → handler symbol.
+# Each framework is matched by a separate pattern; extraction is lossy by
+# design — the goal is "agent can find the handler from a URL" rather than
+# perfect REST modeling.
+
+# Generic dict-style routing: {"GET /foo": handler}
 _ROUTES_DICT_RE = re.compile(r"['\"]([A-Z]+\s+/[^'\"]+)['\"]\s*:\s*([A-Za-z_][\w.]*)")
-_ROUTES_EXPRESS_RE = re.compile(r"\b(?:router|app)\.(get|post|put|patch|delete)\(['\"]([^'\"]+)['\"]\s*,\s*([A-Za-z_][\w.]*)", re.I)
+
+# Express / Koa / Hono: router.get('/foo', handler)
+_ROUTES_EXPRESS_RE = re.compile(
+    r"\b(?:router|app|api)\.(get|post|put|patch|delete|options|head|all|use)\("
+    r"\s*['\"`]([^'\"`]+)['\"`]\s*,\s*(?:[^,)]*?,\s*)?([A-Za-z_$][\w$.]*)",
+    re.I,
+)
+
+# FastAPI / Flask / Starlette / Sanic — both decorator and instance forms.
+# `@router.get("/path") \n def handler(...)` and `@blueprint.route("/path", methods=["POST"])`
+_ROUTES_PY_DECORATOR_RE = re.compile(
+    r"@(?P<prefix>[A-Za-z_][\w]*)\.(?P<method>get|post|put|patch|delete|head|options|route|websocket|api_route)\(\s*"
+    r"['\"](?P<path>[^'\"]+)['\"](?P<rest>[^)]*)\)"
+    r"\s*\n\s*(?:async\s+)?def\s+(?P<handler>[A-Za-z_]\w*)",
+    re.M,
+)
+
+# Django urlpatterns: path("foo/", views.bar) | re_path("...", views.bar) | url("...", views.bar)
+_ROUTES_DJANGO_RE = re.compile(
+    r"\b(?:path|re_path|url)\(\s*r?['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_][\w.]*)"
+)
+
+# NestJS: @Get('foo') / @Post('bar') above a method.
+_ROUTES_NEST_RE = re.compile(
+    r"@(?P<method>Get|Post|Put|Patch|Delete|Options|Head|All)\(\s*['\"`](?P<path>[^'\"`]*)['\"`]?[^)]*\)"
+    r"\s*(?:public\s+|async\s+)*(?P<handler>[A-Za-z_]\w*)\s*\(",
+    re.M,
+)
+
+# Spring (Java/Kotlin): @GetMapping("/foo") / @RequestMapping(value="/foo", method=RequestMethod.POST)
+_ROUTES_SPRING_RE = re.compile(
+    r"@(?P<ann>Get|Post|Put|Patch|Delete|Request)Mapping\(\s*"
+    r"(?:value\s*=\s*)?['\"](?P<path>[^'\"]+)['\"][^)]*\)"
+    r"[\s\S]{0,120}?\b(?:public|private|protected|static|fun|def)\s+[\w<>\[\],?\s]*?\s+(?P<handler>[A-Za-z_]\w*)\s*\("
+)
+
+# Gin / Echo / Chi (Go): router.GET("/foo", Handler) — note the uppercase method.
+_ROUTES_GO_RE = re.compile(
+    r"\b(?:router|r|app|api|e|mux|group|v\d+)\.(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|HandleFunc|Handle)\("
+    r"\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<handler>[A-Za-z_][\w.]*)"
+)
+
+# Actix-web (Rust): .route("/foo", web::get().to(handler)) and #[get("/foo")]
+_ROUTES_RUST_ROUTE_RE = re.compile(
+    r"\.route\(\s*['\"](?P<path>[^'\"]+)['\"]\s*,\s*web::(?P<method>get|post|put|patch|delete|head|options)\(\)\.to\(\s*(?P<handler>[A-Za-z_][\w:]*)"
+)
+_ROUTES_RUST_ATTR_RE = re.compile(
+    r"#\[(?P<method>get|post|put|patch|delete|head|options)\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)\]"
+    r"\s*(?:async\s+)?fn\s+(?P<handler>[A-Za-z_]\w*)"
+)
+
+# Sinatra / Rails routes: get '/foo' do ... | get "/foo", to: "controller#action"
+_ROUTES_RUBY_RE = re.compile(
+    r"^\s*(?P<method>get|post|put|patch|delete|head|options|match)\s+['\"](?P<path>[^'\"]+)['\"]"
+    r"(?:[^\n]*?(?:to:\s*['\"](?P<handler>[A-Za-z_][\w#/]*)['\"]|do\s*$))",
+    re.M,
+)
+
+# Laravel (PHP): Route::get('/foo', [Controller::class, 'method']) or Route::get('/foo', 'Controller@method')
+_ROUTES_LARAVEL_RE = re.compile(
+    r"\bRoute::(?P<method>get|post|put|patch|delete|head|options|any|match)\(\s*"
+    r"['\"](?P<path>[^'\"]+)['\"]\s*,\s*"
+    r"(?:\[([A-Za-z_\\][\w\\]*)::class\s*,\s*['\"](?P<handler1>[A-Za-z_]\w*)['\"]\]"
+    r"|['\"](?P<handler2>[A-Za-z_][\w\\]*(?:@[A-Za-z_]\w*)?)['\"])"
+)
+
+# ASP.NET Core: [HttpGet("foo")] / [Route("foo")] above a method
+_ROUTES_ASPNET_RE = re.compile(
+    r"\[Http(?P<method>Get|Post|Put|Patch|Delete|Head|Options)\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)\]"
+    r"[\s\S]{0,200}?\b(?:public|private|protected|internal)\s+[\w<>\[\],?\s]*?\s+(?P<handler>[A-Za-z_]\w*)\s*\("
+)
+
+
+def _add_route(routes: dict, method: str, path: str, handler: str) -> None:
+    if not path or not handler:
+        return
+    method = method.upper().strip()
+    # Normalize Flask/Starlette decorator that doesn't carry an HTTP verb.
+    if method in {"ROUTE", "WEBSOCKET", "API_ROUTE", "ALL", "MATCH", "ANY", "USE", "HANDLEFUNC", "HANDLE"}:
+        method = "ANY"
+    routes[f"{method} {path}"] = handler
 
 
 def extract_routes(text: str) -> dict[str, str]:
+    """Best-effort URL-pattern → handler-symbol mapping across web frameworks.
+
+    Recognized: FastAPI, Flask, Starlette, Sanic, Django, Express/Koa/Hono,
+    NestJS, Spring, Gin/Echo/Chi (Go), Actix-web (Rust), Sinatra/Rails (Ruby),
+    Laravel (PHP), ASP.NET Core (C#). Pattern-based — false negatives expected
+    on metaprogrammed routes; collisions resolved by last-write-wins so static
+    declarations near the top of files take precedence over generic builders.
+    """
     routes: dict[str, str] = {}
     for m in _ROUTES_DICT_RE.finditer(text):
-        routes[m.group(1)] = m.group(2)
+        # "GET /foo": handler  — split METHOD and path
+        method, _, path = m.group(1).partition(" ")
+        _add_route(routes, method, path, m.group(2))
     for m in _ROUTES_EXPRESS_RE.finditer(text):
-        routes[f"{m.group(1).upper()} {m.group(2)}"] = m.group(3)
+        _add_route(routes, m.group(1), m.group(2), m.group(3))
+    for m in _ROUTES_PY_DECORATOR_RE.finditer(text):
+        method = m.group("method")
+        rest = m.group("rest") or ""
+        # Flask: @app.route("/foo", methods=["POST"])
+        if method.lower() == "route":
+            verb_match = re.search(r"methods\s*=\s*\[\s*['\"]([A-Z]+)['\"]", rest)
+            verb = verb_match.group(1) if verb_match else "ANY"
+            _add_route(routes, verb, m.group("path"), m.group("handler"))
+        else:
+            _add_route(routes, method, m.group("path"), m.group("handler"))
+    for m in _ROUTES_DJANGO_RE.finditer(text):
+        _add_route(routes, "ANY", m.group("path"), m.group("handler"))
+    for m in _ROUTES_NEST_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path") or "/", m.group("handler"))
+    for m in _ROUTES_SPRING_RE.finditer(text):
+        ann = m.group("ann")
+        method = "ANY" if ann == "Request" else ann
+        _add_route(routes, method, m.group("path"), m.group("handler"))
+    for m in _ROUTES_GO_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
+    for m in _ROUTES_RUST_ROUTE_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
+    for m in _ROUTES_RUST_ATTR_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
+    for m in _ROUTES_RUBY_RE.finditer(text):
+        handler = m.group("handler") or "block"
+        _add_route(routes, m.group("method"), m.group("path"), handler)
+    for m in _ROUTES_LARAVEL_RE.finditer(text):
+        handler = m.group("handler1") or m.group("handler2") or ""
+        _add_route(routes, m.group("method"), m.group("path"), handler)
+    for m in _ROUTES_ASPNET_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
     return routes
 
 
@@ -1023,7 +1234,11 @@ def _strip_python(text: str) -> str:
                 continue
             out_tokens.append(tok)
         return tokenize.untokenize(out_tokens)
-    except tokenize.TokenizeError:
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # tokenize raises TokenError (not TokenizeError) on EOF mid-string;
+        # invalid indentation or syntax surfaces as IndentationError/SyntaxError.
+        # All three are recoverable for our heuristic strip — fall back to the
+        # pre-untokenize text rather than crashing the entire review.
         return stripped
 
 
