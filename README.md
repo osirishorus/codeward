@@ -7,11 +7,9 @@
 <p align="center"><strong>Symbol-level codebase intelligence for coding agents.</strong></p>
 
 <p align="center">
-  <a href="demo/codeward-demo.mp4">
-    <img src="demo/codeward-demo.mp4" alt="31-second demo: codeward running against FastAPI" width="720">
-  </a>
+  <img src="demo/codeward-demo.gif" alt="31-second demo: codeward running against FastAPI" width="720">
   <br>
-  <sub><a href="demo/">▶ 31s demo</a> · running against the real <a href="https://github.com/fastapi/fastapi">fastapi/fastapi</a> codebase</sub>
+  <sub>Running against the real <a href="https://github.com/fastapi/fastapi">fastapi/fastapi</a> codebase · <a href="demo/codeward-demo.mp4">MP4</a> · <a href="demo/">how it's built</a></sub>
 </p>
 
 Codeward gives your agent commands the shell can't: "where is this defined?", "who calls it?", "which tests cover it?", "what changed at the symbol level?", "what would break if I edit this file?", "what handles this URL?". It indexes your repo with tree-sitter / Python AST.
