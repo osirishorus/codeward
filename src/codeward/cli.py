@@ -11,10 +11,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .hooks import compact_test_output, estimate_tokens, gain, hook_response, record, rewrite_command
+from .hooks import compact_test_output, estimate_tokens, gain, hook_response, record
 from .index import RepoIndex, extract_security_findings, extract_side_effects, is_test_file
-
-SHIM_TOOLS = ["cat", "head", "tail", "rg", "grep", "find", "tree", "git", "pytest", "npm", "pnpm", "yarn", "cargo", "go"]
 
 def fmt_list(title: str, items: list[str], empty: str = "none") -> list[str]:
     lines = [title + ":"]
@@ -66,6 +64,11 @@ def emit_tracked(lines: list[str], command_name: str, raw_token_estimate: int | 
 
 
 def estimate_raw_command_tokens(command_text: str) -> int:
+    """Best-effort token-size estimate for the raw shell command being rewritten.
+    Only `cat`/`head`/`tail` of a single file is sized precisely (by reading
+    the file). Everything else returns 0 — running arbitrary find/grep just to
+    measure their output is slow and side-effecty for a savings number nobody
+    audits to the byte."""
     try:
         parts = shlex.split(command_text)
     except ValueError:
@@ -80,9 +83,6 @@ def estimate_raw_command_tokens(command_text: str) -> int:
                 return estimate_tokens(Path(paths[0]).read_text(errors="ignore"))
             except OSError:
                 return 0
-    if head in {"find", "tree", "git", "rg", "grep"}:
-        code, out = run_capture_for_savings(command_text, rewritten=False)
-        return estimate_tokens(out)
     return 0
 
 
@@ -1135,7 +1135,7 @@ def cmd_test(args) -> int:
     if not getattr(args, "force", False) and _defer_to_rtk("test"):
         return 0
     command = args.command
-    code, raw, summary = compact_test_output(command, Path.cwd(), env=clean_shim_env())
+    code, raw, summary = compact_test_output(command, Path.cwd())
     print(summary)
     record(Path.cwd(), " ".join(command), estimate_tokens(raw), estimate_tokens(summary))
     return code
@@ -1190,25 +1190,6 @@ def cmd_gain(args) -> int:
     if shutil.which("rtk") is not None:
         print("\nRTK is active — also see `rtk gain` for the cat/grep/find output-compression layer.")
     return 0
-
-
-def run_capture_for_savings(command_text: str, rewritten: bool) -> tuple[int, str]:
-    final = rewrite_command(command_text) if rewritten else None
-    effective = final or command_text
-    try:
-        parts = shlex.split(effective)
-    except ValueError as e:
-        return 2, str(e)
-    if rewritten and parts and parts[0] == "codeward":
-        parts = [sys.executable, "-m", "codeward.cli", *parts[1:]]
-    try:
-        cp = subprocess.run(parts, cwd=Path.cwd(), text=True, capture_output=True, timeout=30, env=clean_shim_env())
-    except FileNotFoundError as e:
-        return 127, str(e)
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") + (e.stderr or "")
-        return 124, out + "\n[Codeward savings: command timed out]"
-    return cp.returncode, (cp.stdout or "") + (cp.stderr or "")
 
 
 def _git_log_commits(since: str = "90d", max_commits: int = 2000) -> list[list[str]]:
@@ -1754,49 +1735,6 @@ def cmd_neighbors(args) -> int:
     return 0
 
 
-def cmd_savings(args) -> int:
-    commands = args.command or [
-        "find . -maxdepth 3 -type f",
-        "git status",
-        "git diff",
-    ]
-    rows = []
-    total_raw = 0
-    total_out = 0
-    for command_text in commands:
-        rewritten = rewrite_command(command_text)
-        if not rewritten:
-            rows.append((command_text, "not rewritten", 0, 0, 0, 0.0))
-            continue
-        raw_code, raw = run_capture_for_savings(command_text, rewritten=False)
-        out_code, compact = run_capture_for_savings(command_text, rewritten=True)
-        raw_tokens = estimate_tokens(raw)
-        out_tokens = estimate_tokens(compact)
-        saved = max(raw_tokens - out_tokens, 0)
-        pct = (saved / raw_tokens * 100) if raw_tokens else 0.0
-        total_raw += raw_tokens
-        total_out += out_tokens
-        status = f"raw={raw_code}, codeward={out_code}"
-        rows.append((command_text, rewritten, raw_tokens, out_tokens, saved, pct, status))
-        if not args.no_history:
-            record(Path.cwd(), f"savings: {command_text} -> {rewritten}", raw_tokens, out_tokens)
-    total_saved = max(total_raw - total_out, 0)
-    total_pct = (total_saved / total_raw * 100) if total_raw else 0.0
-    lines = ["Codeward savings analysis", f"Commands analyzed: {len(rows)}", f"Total raw tokens: {total_raw}", f"Total Codeward tokens: {total_out}", f"Total saved: {total_saved} ({total_pct:.1f}%)", ""]
-    for row in rows:
-        if len(row) == 6:
-            command_text, rewritten, *_ = row
-            lines.append(f"- {command_text}: not rewritten")
-            continue
-        command_text, rewritten, raw_tokens, out_tokens, saved, pct, status = row
-        lines.append(f"- {command_text}")
-        lines.append(f"  rewrite: {rewritten}")
-        lines.append(f"  tokens: raw={raw_tokens}, codeward={out_tokens}, saved={saved} ({pct:.1f}%)")
-        lines.append(f"  status: {status}")
-    print("\n".join(lines))
-    return 0
-
-
 def cmd_index(args) -> int:
     idx = RepoIndex(Path.cwd())
     path = idx.write_sqlite(Path(args.output) if args.output else None)
@@ -1814,112 +1752,6 @@ def cmd_mcp(args) -> int:
     from . import mcp_server
     cwd = Path(args.cwd).resolve() if getattr(args, "cwd", None) else None
     return mcp_server.run(cwd=cwd)
-
-
-def clean_shim_env() -> dict[str, str]:
-    env = os.environ.copy()
-    shim_dir = env.get("CODEWARD_SHIM_DIR")
-    if shim_dir:
-        paths = [p for p in env.get("PATH", "").split(os.pathsep) if Path(p).resolve() != Path(shim_dir).resolve()]
-        env["PATH"] = os.pathsep.join(paths)
-    return env
-
-
-def cmd_run(args) -> int:
-    if args.shell_command:
-        original = args.shell_command
-        original_parts = shlex.split(original)
-    else:
-        command_args = list(args.command)
-        if command_args and command_args[0] == "--":
-            command_args = command_args[1:]
-        original_parts = ([args.tool] if args.tool else []) + command_args
-        original = shlex.join(original_parts)
-    if not original_parts:
-        print("codeward run: missing command", file=sys.stderr)
-        return 2
-    rewritten = rewrite_command(original)
-    final_text = rewritten or original
-    final_parts = shlex.split(final_text)
-    if args.dry_run:
-        print(final_text)
-        return 0
-    if rewritten:
-        env = clean_shim_env()
-        env["CODEWARD_ORIGINAL_COMMAND"] = original
-        return subprocess.run(final_parts, env=env).returncode
-    if args.shell_command:
-        return subprocess.run(final_text, shell=True, env=clean_shim_env()).returncode
-    return subprocess.run(original_parts, env=clean_shim_env()).returncode
-
-
-def cmd_init_agent(args) -> int:
-    root = Path.cwd()
-    if shutil.which("rtk") is not None and not args.force:
-        print("RTK is active on this system and already handles the cat/grep/find layer.", file=sys.stderr)
-        print("Installing Codeward PATH shims would intercept `rtk`'s child lookups and double-transform commands.", file=sys.stderr)
-        print("Re-run with --force to install anyway, or use `codeward init` (no hook) for the semantic-only setup.", file=sys.stderr)
-        return 1
-    bin_dir = root / args.bin_dir
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    for tool in SHIM_TOOLS:
-        shim = bin_dir / tool
-        shim.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "export CODEWARD_SHIM_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\n"
-            f"exec codeward run --tool {shlex.quote(tool)} -- \"$@\"\n"
-        )
-        shim.chmod(0o755)
-
-    if args.agents_md:
-        agents = root / "AGENTS.md"
-        block = agent_instructions_block(args.bin_dir)
-        existing = agents.read_text() if agents.exists() else ""
-        start = "<!-- codeward-shims:start -->"
-        end = "<!-- codeward-shims:end -->"
-        if start in existing and end in existing:
-            before, rest = existing.split(start, 1)
-            _, after = rest.split(end, 1)
-            agents.write_text(before.rstrip() + "\n\n" + block + after.lstrip())
-        elif "## Codeward agent shell integration" not in existing:
-            agents.write_text(existing.rstrip() + "\n\n" + block + "\n")
-    print(f"Installed Codeward agent shims: {bin_dir}")
-    print(f"Enable for Codex/Gemini/other agents with: export PATH=\"$PWD/{args.bin_dir}:$PATH\"")
-    return 0
-
-
-def agent_instructions_block(bin_dir: str) -> str:
-    return f"""<!-- codeward-shims:start -->
-## Codeward agent shell integration
-
-Codeward is installed for coding agents that execute shell commands through this repository, including Codex, Gemini CLI, Claude Code, OpenCode, and other RTK-style agents.
-
-Before running agent tasks from this repo, prepend the local shim directory:
-
-```bash
-export PATH=\"$PWD/{bin_dir}:$PATH\"
-```
-
-The shims forward common noisy tools through `codeward run --tool <name> ...`, so commands like `cat`, `rg`, `find`, `git diff`, and test commands become compact semantic Codeward output when appropriate. Commands Codeward should not handle pass through to the real tool with the shim directory removed from PATH to avoid recursion.
-
-Use `!raw <command>` or invoke the real command outside `{bin_dir}` when exact raw output is required.
-<!-- codeward-shims:end -->
-"""
-
-
-def cmd_coach(args) -> int:
-    original = " ".join(args.command)
-    better = rewrite_command(original)
-    if better and better != original:
-        print(f"Original command: {original}")
-        print(f"Better command: {better}")
-        print("Why: semantic Codeward commands return compact repo-aware output and avoid dumping raw context.")
-        print(f"Bypass: !raw {original}")
-    else:
-        print(f"Command looks acceptable: {original}")
-        print("Tip: use codeward map/read/symbol/impact/review when exploring code structure.")
-    return 0
 
 
 def cmd_hook(args) -> int:
@@ -2542,8 +2374,6 @@ def build_parser() -> argparse.ArgumentParser:
     wt.set_defaults(func=cmd_watch)
     te = sub.add_parser("test"); te.add_argument("--force", action="store_true", help="Run even when RTK is installed"); te.add_argument("command", nargs=argparse.REMAINDER); te.set_defaults(func=cmd_test)
     ix = sub.add_parser("index"); ix.add_argument("--output"); ix.set_defaults(func=cmd_index)
-    rn = sub.add_parser("run"); rn.add_argument("--dry-run", action="store_true"); rn.add_argument("--tool"); rn.add_argument("--shell-command"); rn.add_argument("command", nargs=argparse.REMAINDER); rn.set_defaults(func=cmd_run)
-    ia = sub.add_parser("init-agent"); ia.add_argument("--bin-dir", default=".codeward/bin"); ia.add_argument("--no-agents-md", dest="agents_md", action="store_false"); ia.add_argument("--force", action="store_true", help="Install shims even if RTK is active"); ia.set_defaults(func=cmd_init_agent, agents_md=True)
     gp = sub.add_parser("gain", parents=[common])
     gp.add_argument("--repo", dest="repo_scope", action="store_true",
                     help="Show only this repo's savings (default is global across all repos)")
@@ -2572,8 +2402,6 @@ def build_parser() -> argparse.ArgumentParser:
     nb.add_argument("--top", type=int, default=10, help="Number of neighbors to return (default: 10)")
     nb.add_argument("--max-commits", type=int, default=2000, help="Hard cap on commits scanned (default: 2000)")
     nb.set_defaults(func=cmd_neighbors)
-    sv = sub.add_parser("savings"); sv.add_argument("--command", action="append"); sv.add_argument("--no-history", action="store_true"); sv.set_defaults(func=cmd_savings)
-    co = sub.add_parser("coach"); co.add_argument("command", nargs=argparse.REMAINDER); co.set_defaults(func=cmd_coach)
     hk = sub.add_parser("hook"); hk.add_argument("--agent", choices=["claude", "cursor", "gemini", "codex", "generic"], default="claude"); hk.set_defaults(func=cmd_hook)
     init = sub.add_parser("init")
     init.add_argument("--hook", action="store_true", help="Also install Claude Code Bash hook (opt-in; orders before any RTK entry)")

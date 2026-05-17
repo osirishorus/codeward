@@ -5,9 +5,10 @@ This file is for coding agents (and humans) working **on** Codeward itself.
 ## Quick orientation
 
 - `src/codeward/cli.py` — every `cmd_*` function and the argparse setup. New commands go here.
-- `src/codeward/index.py` — `RepoIndex`, `analyze_file`, side-effect/security/test heuristics, SQLite cache.
-- `src/codeward/analyzers/treesitter.py` — opt-in tree-sitter symbol extraction for Go/Rust/TS/JS/Java/Ruby/PHP/C#.
-- `src/codeward/hooks.py` — Bash and Edit/Write `PreToolUse` hook responses; rewrite logic.
+- `src/codeward/index.py` — `RepoIndex`, `analyze_file`, route extraction, side-effect/security/test heuristics, SQLite cache.
+- `src/codeward/analyzers/treesitter.py` — tree-sitter symbol extraction for 16 non-Python languages (Go, Rust, TS/JS, Java, Ruby, PHP, C#, C, C++, Kotlin, Swift, Scala, Bash, Lua, Elixir). Each grammar loads lazily.
+- `src/codeward/hooks.py` — Bash + Edit/Write `PreToolUse` hook responses, rewrite logic, `gain` renderer.
+- `src/codeward/mcp_server.py` — MCP server wrapping the CLI command surface as tools.
 - `src/codeward/watch.py` — foreground re-indexer (incremental SQLite updates on file events).
 - `tests/test_cli.py` — every command has a regression test.
 
@@ -17,7 +18,7 @@ This file is for coding agents (and humans) working **on** Codeward itself.
 python3 -m pytest tests/ -q
 ```
 
-Skips for missing tree-sitter packages are expected when the `[full]` extra isn't installed in the test env.
+Tests that need a specific tree-sitter grammar use `pytest.importorskip` so missing wheels skip those cases rather than failing.
 
 ## Conventions
 

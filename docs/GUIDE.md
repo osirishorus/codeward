@@ -1,12 +1,10 @@
 # Codeward Guide
 
-This guide explains how to use Codeward in real coding-agent workflows, how the hooks work, and how to verify token savings.
+How to install Codeward, wire it into a coding agent, and verify the savings. For an overview of what each command does, see the project [README](../README.md).
 
 ## 1. Mental model
 
-Codeward replaces noisy codebase exploration with semantic commands.
-
-Instead of this agent workflow:
+Codeward replaces noisy codebase exploration with semantic commands. Instead of:
 
 ```bash
 find . -maxdepth 3 -type f
@@ -14,76 +12,86 @@ cat src/app.py
 cat src/db.py
 rg UserService
 git diff
-pytest -q
 ```
 
-Codeward steers the agent toward:
+an agent driven by Codeward reaches for:
 
 ```bash
 codeward map
 codeward read src/app.py
 codeward read src/db.py
 codeward search UserService
-codeward diff
-codeward test pytest -q
+codeward sdiff
 ```
 
-The result is smaller and more useful context.
+The semantic commands answer the same questions with one or two orders of magnitude fewer tokens, because they return structured summaries (symbols, dependents, callers, blast-radius) instead of raw file dumps.
 
-## 2. Install in a project
+Two surfaces matter:
 
-Install Codeward once:
+1. **Vocabulary** — `codeward init` writes the command names into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` so the agent learns to call them. No hooks.
+2. **Hooks** — `codeward init --hook` actively rewrites `cat foo.py` → `codeward read foo.py` and injects preflight context before every `Edit`/`Write`.
+
+Run **vocabulary-only first**. Add hooks when you want the agent's wrong shell habits corrected automatically.
+
+## 2. Install
 
 ```bash
-cd /path/to/codeward
-python3 -m pip install -e .
+pipx install codeward          # recommended — isolated, on PATH
+# or
+pip install --user codeward
+# or
+npx codeward init              # Node/JS users; wrapper bootstraps via pipx
 ```
 
-Then move to the repository you want agents to work on:
+Python ≥ 3.11 required. Tree-sitter grammars for 17 languages and `watchdog` ship by default.
+
+From source:
 
 ```bash
-cd /path/to/target/repo
+git clone https://github.com/osirishorus/codeward.git
+pipx install --editable ./codeward
+```
+
+## 3. Default install: vocabulary only
+
+```bash
+cd /path/to/your/repo
+codeward init       # writes CLAUDE.md + AGENTS.md vocabulary
+codeward init --global   # also writes ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.gemini/GEMINI.md
 codeward map
+codeward doctor
 ```
 
-If `codeward map` prints a repo overview, Codeward is ready.
+Nothing is hooked. The agent learns the verbs from the memory files and uses them when it judges they're cheaper than raw `cat`/`grep`.
 
-## 3. Default install: semantic commands only
+## 4. Hook install
 
-Codeward is built to complement RTK rather than compete with it. The default install does **not** touch any hooks. It writes the semantic-command vocabulary to **both** `CLAUDE.md` (Claude Code's auto-discovered memory file) and `AGENTS.md` (the Codex/Cursor convention):
+When you want Codeward to actively intervene:
 
 ```bash
-codeward init
+codeward init --hook                            # Claude, project-local
+codeward init --hook --global                   # Claude, every repo
+codeward init --hook --no-hook-bash             # edit-preflight only (good w/ RTK)
+codeward init --hook --global --gemini --codex  # Claude + Gemini + Codex, global
 ```
 
-After this, an agent navigating the repo can use `codeward map`, `codeward read`, `codeward symbol`, `codeward callgraph`, `codeward tests-for`, `codeward impact`, `codeward review`, plus symbol-level commands `codeward slice`, `codeward refs`, `codeward blame`, `codeward sdiff`, `codeward api`, and `codeward preflight`. `refs`, `symbol`, and `callgraph` label analyzer confidence instead of presenting heuristic matches as exact. RTK keeps owning Bash output compression for `cat`, `rg`, `grep`, `find`, `git status`, etc.
+What each agent's hook does:
 
-### Optional: hook-mode install
+| Agent | What gets wired |
+|---|---|
+| **Claude Code** | `PreToolUse` on `Bash` (rewrite) + `Edit\|Write\|MultiEdit` (preflight). `~/.claude/settings.json` |
+| **Codex CLI** | `PreToolUse` on `^apply_patch$` (preflight only — Codex hooks parse but ignore `updatedInput`, so Bash rewrite is skipped). `~/.codex/hooks.json` |
+| **Gemini CLI** | `BeforeTool` on `run_shell_command` (rewrite + preflight). `~/.gemini/settings.json` |
 
-If you want Codeward to also rewrite Bash commands AND inject preflight context before `Edit`/`Write`:
+Re-running `codeward init --hook ...` is idempotent.
 
-```bash
-codeward init --hook              # project-local hook (both Bash + Edit/Write)
-codeward init --hook --global     # also wire ~/.claude/settings.json
-codeward init --hook --no-hook-edit  # Bash-only, skip Edit/Write preflight
-```
-
-Two PreToolUse entries are installed:
-
-- `matcher: "Bash"` — rewrites `cat foo.py` → `codeward read foo.py` and tracks savings.
-- `matcher: "Edit|Write|MultiEdit"` — runs `codeward preflight <file>` and injects dependents/tests/side-effects/security-flags via `additionalContext` before the edit happens.
-
-The `--global` form inserts the Bash entry **before** any existing `rtk hook claude` entry. RTK only matches `Bash`, so the Edit/Write hook never clashes with it. The installer is idempotent — re-running is a no-op.
-
-Restart Claude Code (or start a new session in the repo) for hook changes to take effect.
-
-### Verify Claude hook output
+### Verify the Claude hook output
 
 ```bash
 printf '%s' '{"tool_input":{"command":"cat src/app.py"}}' | codeward hook --agent claude
 ```
 
-Expected shape:
+Expected:
 
 ```json
 {
@@ -98,158 +106,80 @@ Expected shape:
 }
 ```
 
-If Codeward does not rewrite, stdout is empty and the original command runs.
+Empty stdout = no rewrite, original command runs.
 
-## 4. Universal PATH shims
-
-For Codex, Gemini CLI, OpenCode, terminal-based agents, or any tool that executes shell commands:
+### Verify the Codex hook output
 
 ```bash
-codeward init-agent
-export PATH="$PWD/.codeward/bin:$PATH"
+printf '%s' '{"tool_name":"apply_patch","tool_input":{"file_path":"src/app.py"}}' \
+  | codeward hook --agent codex
 ```
 
-If RTK is installed, `init-agent` refuses by default — its shims would intercept `rtk`'s child lookups and double-transform commands. Use `codeward init-agent --force` if you really want both layered. In most setups with RTK, you don't need the shims at all: RTK already handles the cat/grep/find surface.
+Returns a `hookSpecificOutput.additionalContext` block — preflight (dependents, tests, side-effects, routes, blast-radius) gets injected before the edit reaches the model.
 
-This installs shims for:
-
-```text
-cat head tail rg grep find tree git pytest npm pnpm yarn cargo go
-```
-
-### Verify shim behavior
+### Verify the Gemini hook output
 
 ```bash
-PATH="$PWD/.codeward/bin:$PATH" cat src/app.py
+printf '%s' '{"tool_name":"run_shell_command","tool_input":{"command":"cat src/app.py"}}' \
+  | codeward hook --agent gemini
 ```
 
-If `src/app.py` is indexed and code-like, output should be a semantic `codeward read` summary.
-
-For a non-code file, Codeward should pass through:
+## 5. Cursor and generic wrappers
 
 ```bash
-PATH="$PWD/.codeward/bin:$PATH" cat README.md
+codeward hook --agent cursor
+codeward hook --agent generic
 ```
 
-## 5. Gemini CLI
+Generic output writes the rewrite as `{"updatedInput": {"command": "..."}}` — useful for custom shell wrappers and plugin systems.
 
-If you want a native Gemini hook, configure `codeward hook --agent gemini` as a `BeforeTool` hook for `run_shell_command`.
+## 6. MCP server (any MCP client)
 
-Example `.gemini/settings.json`:
+```bash
+pip install 'codeward[mcp]'
+```
+
+Add to your client's `mcpServers` config (Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop):
 
 ```json
 {
-  "hooks": {
-    "BeforeTool": [
-      {
-        "matcher": "run_shell_command",
-        "hooks": [
-          {
-            "type": "command",
-            "name": "codeward-rewrite",
-            "command": "codeward hook --agent gemini"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Verify:
-
-```bash
-printf '%s' '{"tool_name":"run_shell_command","tool_input":{"command":"cat src/app.py"}}' | codeward hook --agent gemini
-```
-
-Expected shape:
-
-```json
-{
-  "decision": "allow",
-  "hookSpecificOutput": {
-    "tool_input": {
-      "command": "CODEWARD_ORIGINAL_COMMAND='cat src/app.py' codeward read src/app.py"
+  "mcpServers": {
+    "codeward": {
+      "command": "codeward",
+      "args": ["mcp", "--cwd", "/path/to/your/repo"]
     }
   }
 }
 ```
 
-No rewrite returns:
+Every read-only Codeward command becomes a first-class MCP tool. No per-tool hook config.
 
-```json
-{"decision":"allow"}
-```
+## 7. Token-savings tracking
 
-## 6. Cursor and generic wrappers
+Codeward records every hook-rewritten or directly-invoked semantic command:
 
-Cursor-style hook:
+- per-repo: `<repo>/.codeward/history.jsonl`
+- global: `~/.codeward/history.jsonl`
 
-```bash
-codeward hook --agent cursor
-```
-
-Generic hook shape:
+Show savings:
 
 ```bash
-codeward hook --agent generic
+codeward gain               # global (default)
+codeward gain --repo        # just this repo
+codeward gain --all         # both, deduplicated
 ```
 
-Generic output is useful for custom shell wrappers and plugin systems that understand `updatedInput.command`.
-
-## 7. OpenCode plugin pattern
-
-OpenCode plugin integrations should call Codeward's rewrite primitive and mutate the command if it changes.
-
-Pseudo-code:
-
-```ts
-const result = await $`codeward run --dry-run --shell-command ${command}`.quiet().nothrow()
-const rewritten = String(result.stdout).trim()
-
-if (rewritten && rewritten !== command) {
-  args.command = rewritten
-}
-```
-
-Keep plugin code thin. All rewrite policy should stay in `codeward.hooks.rewrite_command`.
-
-## 8. Token savings tracking
-
-Codeward records history in:
-
-```text
-.codeward/history.jsonl
-```
-
-Show current savings:
-
-```bash
-codeward gain
-```
-
-Benchmark raw-vs-Codeward behavior:
-
-```bash
-codeward savings --no-history \
-  --command 'cat src/app.py' \
-  --command 'find . -maxdepth 3 -type f' \
-  --command 'git status'
-```
-
-During real hook/shim usage, Codeward tracks savings by carrying the original command through `CODEWARD_ORIGINAL_COMMAND`:
+During hook usage, Codeward carries the original command via the `CODEWARD_ORIGINAL_COMMAND` env var so the size estimate is honest:
 
 ```bash
 CODEWARD_ORIGINAL_COMMAND='cat src/app.py' codeward read src/app.py
 ```
 
-The semantic command records raw-token estimate, output-token estimate, and saved tokens.
+## 8. Safe rewrite policy
 
-## 9. Safe rewrite policy
+Codeward rewrites only the simple shell patterns where semantics are preserved.
 
-Codeward rewrites only simple commands where semantics are preserved.
-
-Safe examples:
+Rewritten:
 
 ```bash
 cat src/app.py
@@ -262,7 +192,7 @@ git diff
 pytest -q
 ```
 
-Unsafe or ambiguous examples that pass through:
+Passes through (would change behavior or scope):
 
 ```bash
 cat src/app.py && echo done
@@ -275,110 +205,55 @@ git diff main...HEAD
 git status -s
 ```
 
-This avoids losing shell semantics or narrowing the user's intended scope incorrectly.
+To bypass rewriting explicitly, prefix with `!raw`:
 
-## 10. Working with RTK or other compressors
+```bash
+!raw cat src/app.py
+```
 
-Codeward and RTK own different layers and compose cleanly:
+## 9. Composing with RTK
+
+Codeward and RTK own different layers:
 
 | Layer | Owner | Examples |
 |---|---|---|
-| Bash output compression | RTK | `cat`, `rg`, `grep`, `find`, `git status`, `pytest` — RTK runs the command and squeezes the output |
-| Semantic codebase queries | Codeward | `codeward symbol`, `callgraph`, `tests-for`, `impact`, `review` — answer questions RTK can't |
+| Bash output compression | RTK | `cat`, `rg`, `grep`, `find`, `git status`, `pytest` |
+| Semantic codebase queries | Codeward | `slice`, `refs`, `blame`, `sdiff`, `routes`, `preflight` |
 
-The default `codeward init` (no `--hook`) does not touch hooks at all, so there is nothing to fight RTK over. The semantic commands are agent-invoked.
+With both installed, Codeward's Bash hook is inserted *before* RTK's so the rewrite happens first; RTK then passes `codeward ...` through unchanged. Edit/Write preflight is on a different matcher and never clashes.
 
-If you opt into the hook layer with `codeward init --hook --global`, Codeward's hook is placed **before** RTK's in `~/.claude/settings.json`. Both fire on `Bash`. Codeward rewrites first to `codeward <semantic>`; RTK then receives a command starting with `codeward`, which it passes through unchanged (RTK has the same ignore convention). No recursion, no double-wrapping.
+`codeward doctor` checks hook ordering and warns if RTK runs first.
 
-Codeward never rewrites commands starting with:
+Codeward never rewrites commands starting with `codeward`, `rtk`, `contextzip`, or `snip`.
 
-```text
-codeward
-rtk
-contextzip
-snip
-```
-
-Run `codeward doctor` at any time to check RTK presence, hook position, PATH-shim conflicts, and index freshness.
-
-## 11. Real-world benchmark recipe
-
-This is the benchmark used to validate Codeward against Flask.
-
-```bash
-rm -rf /tmp/codeward-bench
-mkdir -p /tmp/codeward-bench
-git clone --depth 1 https://github.com/pallets/flask.git /tmp/codeward-bench/flask
-cd /tmp/codeward-bench/flask
-
-codeward init
-codeward init-agent
-codeward index
-rm -f .codeward/history.jsonl
-
-PATH="$PWD/.codeward/bin:$PATH" claude -p \
-  "Use ONLY Bash. Do not use Read/Grep/Glob/Edit. Do not modify files. First run these exact shell commands one by one, then use their compact output to analyze Flask architecture: find . -maxdepth 3 -type f ; cat src/flask/app.py ; cat src/flask/ctx.py ; cat src/flask/cli.py ; cat tests/test_basic.py ; git status. Then write a concise report on how well Codeward hook compression worked and what architecture you learned." \
-  --allowedTools "Bash" \
-  --max-turns 15 \
-  --output-format json
-
-codeward gain
-```
-
-Observed representative side-by-side savings:
-
-```text
-Commands analyzed: 6
-Total raw tokens: 45196
-Total Codeward tokens: 2816
-Total saved: 42380 (93.8%)
-```
-
-## 12. Troubleshooting
+## 10. Troubleshooting
 
 ### Hook does nothing
 
-Check that `codeward` is installed and available:
-
 ```bash
-which codeward
-codeward --help
+which codeward          # binary on PATH?
+codeward doctor         # hooks installed? ordering correct? index fresh?
 ```
 
-For Claude Code, verify:
+### Index out of date
+
+The SQLite index at `.codeward/index.sqlite` invalidates on mtime change of any indexed file. To force a rebuild:
 
 ```bash
-python3 -m json.tool .claude/settings.local.json
+CODEWARD_NO_CACHE=1 codeward map
+# or
+rm -rf .codeward/index.sqlite
+codeward index
 ```
 
-### PATH shim recurses or hangs
+### Long sessions
 
-Codeward shims should remove `.codeward/bin` before pass-through. Reinstall shims:
-
-```bash
-codeward init-agent
-```
-
-Then verify direct pass-through:
-
-```bash
-PATH="$PWD/.codeward/bin:$PATH" cat README.md | head
-```
+`codeward watch` runs a foreground re-indexer that keeps the SQLite cache hot via `watchdog` (or 2-second mtime polling if `watchdog` isn't installed).
 
 ### Agent needs exact raw output
 
-Use:
-
-```bash
-!raw <command>
-```
-
-or temporarily remove the shim path:
-
-```bash
-PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/.codeward/bin' | paste -sd: -)
-```
+Prefix with `!raw`, or call the real binary directly.
 
 ### Savings look wrong
 
-`codeward savings` estimates tokens with `len(text) // 4`. It is meant for relative context reduction, not billing-grade accounting. For small commands, semantic output can be larger than raw output; Codeward records saved tokens as zero in that case.
+`gain` estimates tokens with `len(text) // 4`. It's relative-context-reduction, not billing-grade. For small commands, semantic output can be larger than raw output; Codeward records saved-tokens as zero in that case.

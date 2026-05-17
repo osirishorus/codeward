@@ -1,66 +1,69 @@
 # Codeward roadmap
 
-Tracks shipped features and forward direction. For per-release detail see `CHANGELOG.md`.
+Tracks shipped surface and forward direction. For per-release detail see `CHANGELOG.md`.
 
 ## Position
 
 Codeward is the **semantic-query layer** for coding agents. It composes with [RTK](https://github.com/rtk-ai/rtk) (which owns the Bash output-compression layer) — different surfaces, no clash.
 
-## Shipped (v0.4.0)
+## Shipped (v0.5.x)
 
-### Semantic queries
+### Repo queries
 - `codeward map` — repo orientation
-- `codeward read <file>` — symbols, dependents, tests, side effects (with optional `--flow` for compact method bodies)
+- `codeward read <file>` — symbols, dependents, tests, side effects (`--flow` adds compact method bodies)
 - `codeward search <q>` — index-grouped search
-- `codeward symbol <name>` — definitions + confidence-ranked callers + tests
-- `codeward callgraph <route|symbol>` — confidence-ranked flow summary
+- `codeward symbol <name>` — definition + confidence-ranked callers + tests (fuzzy fallback included)
+- `codeward callgraph <route|symbol>` — confidence-ranked flow summary; accepts route patterns directly
 - `codeward tests-for <target>` — likely covering tests
-- `codeward impact [--changed | <target>]` — dependents + tests + risk for changed files
-- `codeward review [--changed] [--security]` — pre-commit semantic review
-- `codeward diff-pack [--changed] [--base <ref>]` — compact changed-code bundle for agent planning/review
+- `codeward impact [--changed | <target>]` — dependents + tests + risk
+- `codeward review [--changed] [--security]` — pre-commit semantic + heuristic security review
+- `codeward api <file-or-dir>` — public API surface only
+- `codeward routes [target] [--method] [--filter]` — framework-aware URL → handler mapping across FastAPI, Flask, Django, Express, NestJS, Spring, Gin, Actix, Rails, Laravel, ASP.NET Core
 
-### Symbol-level commands (Phase B)
-- `codeward slice <Class.method>` — exact bytes when AST/tree-sitter line ranges exist; replaces `sed -n 'X,Yp'`
-- `codeward refs <symbol>` — confidence-ranked reference sites, separate from definitions
+### Symbol-level
+- `codeward slice <Class.method>` — exact bytes via AST/tree-sitter ranges
+- `codeward refs <symbol>` — confidence-ranked reference sites (column-aware filtering)
 - `codeward blame <symbol>` — `git blame` aggregated by author over the symbol's range
 - `codeward sdiff [--base <ref>]` — semantic diff: symbols added/removed/changed
-- `codeward api <file-or-dir>` — public API surface only
 
-### Edit-time hooks (Phase C)
-- `codeward preflight <file>` — context an editor should see before changing a file
-- `PreToolUse` on `Edit|Write|MultiEdit` — auto-injects preflight via `additionalContext`
+### Edit-time hooks
+- `codeward preflight <file>` — context an editor should see before changing a file (routes/dependents/tests/side-effects/blast-radius)
+- Claude `PreToolUse` on `Edit|Write|MultiEdit` — auto-injects preflight
+- Codex `PreToolUse` on `^apply_patch$` — same response shape, edit-only
+- Gemini `BeforeTool` on `run_shell_command`
 
-### Git-history awareness (Phase E)
+### Git-history awareness
 - `codeward hotspots [--since 90d] [--top N]` — files ranked by churn × dependents
-- `codeward neighbors <file> [--since 90d]` — files that historically change together
-- `codeward pack` now includes top co-change neighbors as `relation: "co-change"`
-- `codeward impact` flags high-churn changed files as hotspots and bumps risk to HIGH
+- `codeward neighbors <file>` — files that historically change together
+- `codeward pack` / `diff-pack` include co-change neighbors
+- `codeward impact` flags high-churn files as hotspots
 
-### MCP server (Phase F)
-- `codeward mcp [--cwd <path>]` — stdio MCP server exposing 19 read-only Codeward commands as MCP tools. One config entry works for any MCP-compatible agent (Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop) — no per-tool hook wiring required.
-- Optional dep: `pip install 'codeward[mcp]'`.
+### Token-budget bundling
+- `codeward budget [target]` — token cost audit + cheaper command recommendations
+- `codeward pack <target> [--max-tokens]` — budgeted context bundle
+- `codeward diff-pack [--changed] [--base]` — budgeted changed-code bundle
 
-### Performance / tooling (Phase D + 0)
-- `codeward watch` — `watchdog`-based incremental SQLite re-indexer
-- `--json` on every read-only command (stable schema in `docs/JSON_SCHEMA.md`)
-- `.codeward/config.toml` — per-repo ignore dirs, test dirs, custom side-effect rules
-- Tree-sitter language support (Go, Rust, TS, JS, Java, Ruby, PHP, C#) in the default install
-- Analyzer metadata on indexed files/symbols and JSON rows: `analyzer`, `precision`, `confidence`
+### MCP server
+- `codeward mcp [--cwd <path>]` — stdio MCP server. One config entry exposes every read-only command to Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop.
+- Optional dep: `pip install 'codeward[mcp]'`
 
-### Agent integrations
-- Claude Code: native `PreToolUse` hook (Bash + Edit/Write)
-- Cursor / Gemini CLI / generic: `codeward hook --agent <name>`
-- Codex / OpenCode / shell-based agents: PATH shims via `codeward init-agent`
-- All agents: `CLAUDE.md` + `AGENTS.md` vocabulary written by `codeward init`
+### Language coverage
+- 17 languages: Python (AST), Go, Rust, TS/JS, Java, Ruby, PHP, C#, C, C++, Kotlin, Swift, Scala, Bash, Lua, Elixir (tree-sitter)
+- Each grammar loads lazily — missing wheels degrade only that language
+
+### Distribution
+- `pipx install codeward` / `pip install codeward` (PyPI)
+- `npx codeward` (npm wrapper bootstraps via pipx/pip)
+- Native hooks for Claude / Codex / Gemini; MCP for the rest
 
 ## Forward direction
 
-### Likely next (high leverage, no RTK overlap)
-- **Symbol-aware diff in PR comments** — GitHub Action wrapping `codeward sdiff`, `review --security`, and `diff-pack`.
+### Likely next (no RTK overlap)
+- **GitHub Action wrapping `sdiff` + `review --security` + `diff-pack`** — symbol-aware PR comments.
 - **Incremental tree-sitter parses** in watch mode (currently full-file reanalyze on each event).
+- **LSP-backed precision** for languages where tree-sitter gives only syntax-aware confidence.
 
-### Maybe (waiting on usage signal)
-- LSP-backed mode for exact references and call-graphs (currently Python AST high-confidence, tree-sitter syntax-aware, regex heuristic fallback).
+### Maybe
 - VS Code extension (heavier; defer until terminal CLI is rock-solid).
 - Multi-repo workspace support (currently per-repo).
 
@@ -71,7 +74,7 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 
 ## Architecture summary
 
-- **Default install includes precision tooling.** `pip install codeward` includes tree-sitter grammars and `watchdog`.
-- **Optional `[full]`** remains as a backward-compatible empty alias.
-- **No daemon required.** `codeward watch` is foreground; users wrap in systemd/launchd if they want it backgrounded.
-- **No remote services.** Everything is local; `.codeward/index.sqlite` per repo.
+- **Tree-sitter + Python AST.** Default install pulls in 16 tree-sitter grammars and `watchdog`.
+- **SQLite index** at `.codeward/index.sqlite` per repo; mtime invalidation.
+- **No daemon required.** `codeward watch` is foreground; users wrap in systemd/launchd if needed.
+- **No remote services.** Everything is local.

@@ -128,11 +128,8 @@ def noop_response(agent: str) -> dict | None:
         return {"decision": "allow"}
     if agent == "cursor":
         return {}
-    if agent == "codex":
-        # Codex treats `exit 0 / no stdout` as "no-op" (no context injected,
-        # default permission). An empty dict prints `{}` which Codex still
-        # parses as a no-op; we return None to skip writing anything.
-        return None
+    # Claude / Codex / generic: returning None tells the hook entry point to
+    # exit 0 with no stdout, which both runtimes treat as "no decision".
     return None
 
 
@@ -281,7 +278,10 @@ def parse_command_field(s: str) -> tuple[str, str, str]:
     Stored shapes:
       - 'hook: cat foo.py -> codeward read foo.py'   (Bash-hook rewrite)
       - 'direct: codeward read foo.py'                (agent invoked codeward directly)
-      - 'savings: cat foo.py -> codeward read foo.py' (codeward savings benchmark)
+      - 'savings: ...'                                (legacy — written by the
+        v0.4-era `codeward savings` benchmark, which no longer exists. Kept
+        because old `.codeward/history.jsonl` files still contain these rows
+        and we want `gain` to render them rather than mis-parse them as raw.)
     Falls back to ('', s, s) if the format is unrecognized."""
     if s.startswith("hook: ") and " -> " in s:
         original, rewritten = s[len("hook: "):].split(" -> ", 1)

@@ -4,6 +4,21 @@ All notable changes to Codeward will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning after `0.1.0`.
 
+## [0.5.2] - 2026-05-16
+
+### Removed
+
+- `codeward init-agent` and the entire PATH-shim path (`SHIM_TOOLS`, `agent_instructions_block`, `cmd_run`, `clean_shim_env`). Native hooks for Claude / Codex / Gemini cover the same surface; the shim layer added install ceremony and a doctor-warning category nobody asked for.
+- `codeward savings` and `run_capture_for_savings`. The benchmark harness shelled out to arbitrary shell commands to size their output — slow, side-effecty, and the number was a rounding error compared to actual `gain` history. `gain` itself is unchanged.
+- `codeward coach`. Educational printout for "your command should be X instead" — superseded by the Bash hook actually performing the rewrite.
+- `codeward run`. Only used by the PATH-shim path; gone with it.
+
+### Changed
+
+- `estimate_raw_command_tokens` no longer shells out for `find`/`grep`/`tree`/`git` to size raw output. Only `cat`/`head`/`tail` of a single file are sized precisely (by reading the file). Cumulative `gain` numbers are slightly lower on hook-heavy sessions; per-call accuracy is unchanged.
+- Test suite trimmed: removed `test_coach_*`, `test_run_dry_run_*`, `test_init_agent_*`, `test_savings_command_*`. Rewrote `test_rewrite_avoids_unsafe_shell_and_flaggy_commands` to call `rewrite_command` directly instead of going through the removed `run --dry-run` interface.
+- `docs/GUIDE.md` rewritten for v0.5.x — drops the PATH-shim section, adds the Codex hook section, tightens the rest. `docs/PLAN.md` synced to current surface.
+
 ## [0.5.1] - 2026-05-16
 
 ### Added

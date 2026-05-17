@@ -40,7 +40,7 @@ If budget for only one tool, install **RTK** first. Add Codeward for refactor pl
 
 v0.5.x. CLI surface and JSON schema are stable across `0.5.x`.
 
-- **Solid:** core commands (`map`, `read`, `search`, `symbol`, `slice`, `refs`, `tests-for`, `impact`, `preflight`, `routes`), SQLite index with mtime invalidation, Claude/Gemini hook adapters, MCP server, `--json`, `gain` history.
+- **Solid:** core commands (`map`, `read`, `search`, `symbol`, `slice`, `refs`, `tests-for`, `impact`, `preflight`, `routes`), SQLite index with mtime invalidation, Claude/Codex/Gemini hook adapters, MCP server, `--json`, `gain` history.
 - **Maturity varies by language:** `callgraph`, `blame`, `sdiff`, `api`, `review --security` — see the [Commands](#commands) table.
 
 ## Install
@@ -169,12 +169,11 @@ Precision depends on the analyzer for the file. `--json` output annotates each r
 
 ### Operations & adapters
 
-- `codeward gain [--repo\|--all]` — token savings history (defaults to **global** across all repos; `--repo` for the current repo only), formatted like `rtk gain`
+- `codeward gain [--repo\|--all]` — token savings history (defaults to **global** across all repos; `--repo` for the current repo only)
 - `codeward doctor` — environment / hook ordering / index health
 - `codeward index` / `codeward watch` — explicit / continuous indexing
-- `codeward init [--hook] [--global] [--gemini] [--no-hook-bash] [--no-hook-edit]` — vocabulary + optional hooks
-- `codeward init-agent [--force]` — PATH shims for Codex / Aider / shell agents (refuses if RTK detected)
-- `codeward hook --agent {claude,cursor,gemini,generic}` — agent hook adapter (stdin → stdout)
+- `codeward init [--hook] [--global] [--gemini] [--codex] [--no-hook-bash] [--no-hook-edit]` — vocabulary + optional hooks
+- `codeward hook --agent {claude,cursor,gemini,codex,generic}` — agent hook adapter (stdin → stdout)
 - `codeward mcp [--cwd <path>]` — MCP server on stdio. One config entry exposes all read-only commands to any MCP client (Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop). Install with `pip install 'codeward[mcp]'`
 
 ### Deferred to RTK when present
@@ -227,27 +226,24 @@ Add to your client's MCP config (Claude Desktop: `~/Library/Application Support/
 }
 ```
 
-All 20 read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_pack`, `codeward_diff_pack`, `codeward_impact`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
+All read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_routes`, `codeward_pack`, `codeward_diff_pack`, `codeward_impact`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
 
 **Native hooks (for the agents that have them):**
 
 | Agent | Native hook? | What `codeward init` gives you |
 |---|---|---|
 | **Claude Code** | ✅ `PreToolUse` | `--hook` / `--hook --global` writes `~/.claude/settings.json`. Two matchers: `Bash` (rewrite) + `Edit\|Write\|MultiEdit` (preflight) |
-| **Gemini CLI** | ✅ `BeforeTool` | `--gemini` writes `~/.gemini/settings.json` (matcher: `run_shell_command`) |
 | **Codex CLI** | ✅ `PreToolUse` (Edit only) | `--codex` writes `~/.codex/hooks.json` (matcher: `^apply_patch$`). Edit-time preflight only — Codex hooks don't support `updatedInput`, so Bash rewrite is skipped |
+| **Gemini CLI** | ✅ `BeforeTool` | `--gemini` writes `~/.gemini/settings.json` (matcher: `run_shell_command`) |
 | **Cursor** | ✅ Extension API | None automatic — paste `codeward hook --agent cursor` into a Cursor plugin |
-| **Aider / OpenCode / shell agents** | ❌ no shell hook | Vocabulary via `init --global` + optional `init-agent` PATH shims |
 
 ```bash
 # Most common combinations
-codeward init --hook                          # Claude, project-local
-codeward init --hook --global                 # Claude, every repo
-codeward init --hook --no-hook-bash           # Claude edit-preflight only (w/ RTK)
-codeward init --hook --global --gemini        # Claude + Gemini, global
-codeward init --hook --global --codex         # Claude + Codex edit-preflight, global
-codeward init --global                        # vocab only (writes CLAUDE/AGENTS/GEMINI.md)
-codeward init-agent && export PATH="$PWD/.codeward/bin:$PATH"   # Aider/OpenCode PATH shims
+codeward init --hook                            # Claude, project-local
+codeward init --hook --global                   # Claude, every repo
+codeward init --hook --no-hook-bash             # Claude edit-preflight only (w/ RTK)
+codeward init --hook --global --gemini --codex  # Claude + Gemini + Codex, global
+codeward init --global                          # vocab only (writes CLAUDE/AGENTS/GEMINI.md)
 ```
 
 ## Case study: refactor on FastAPI

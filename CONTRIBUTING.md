@@ -29,11 +29,10 @@ When adding or changing agent integrations:
 
 1. Keep rewrite policy centralized in `codeward.hooks.rewrite_command`.
 2. Keep agent adapters thin: parse stdin JSON, call the rewrite primitive, emit the agent's expected JSON shape.
-3. Fail open for optimizer hooks. Invalid JSON, unsupported tools, and no-rewrite cases must not block the user's original command.
+3. Fail open. Invalid JSON, unsupported tools, and no-rewrite cases must not block the user's original command.
 4. Do not rewrite compound shell commands unless semantics are preserved.
-5. Avoid recursion. PATH shims must remove `.codeward/bin` before pass-through and rewritten execution.
-6. Treat `!raw <command>` as command substitution, not permission approval.
-7. Add fixtures for every supported agent shape: Claude, Gemini, Cursor, generic.
+5. Treat `!raw <command>` as command substitution, not permission approval.
+6. Add fixtures for every supported agent shape: Claude, Codex, Gemini, Cursor, generic.
 
 ## Conservative rewrite policy
 
@@ -74,5 +73,6 @@ Also verify:
 
 ```bash
 codeward --help
-codeward savings --no-history --command 'cat src/codeward/cli.py'
+codeward map
+codeward doctor
 ```

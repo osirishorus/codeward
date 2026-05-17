@@ -301,22 +301,24 @@ def test_hook_handles_string_input_and_ignores_non_shell_tools(sample_repo):
     assert edit.stdout == ""
 
 
-def test_rewrite_avoids_unsafe_shell_and_flaggy_commands(sample_repo):
-    cases = [
-        ["run", "--dry-run", "--shell-command", "cat src/services/user_service.py && echo done"],
-        ["run", "--dry-run", "--shell-command", "rg --type py User"],
-        ["run", "--dry-run", "--shell-command", "rg User src tests"],
-        ["run", "--dry-run", "--shell-command", "grep User src/services/user_service.py"],
-        ["run", "--dry-run", "--shell-command", "cat src/services/user_service.py src/db.py"],
-        ["run", "--dry-run", "--shell-command", "tail -f app.log"],
-        ["run", "--dry-run", "--shell-command", "cat README.md"],
-        ["run", "--dry-run", "--shell-command", "git diff main...HEAD"],
-        ["run", "--dry-run", "--shell-command", "git status -s"],
+def test_rewrite_avoids_unsafe_shell_and_flaggy_commands():
+    """rewrite_command must return None (no substitution) for commands with
+    shell metacharacters, multiple paths, flags, or non-source extensions —
+    rewriting these would change behavior or output."""
+    from codeward.hooks import rewrite_command
+    untouched = [
+        "cat src/services/user_service.py && echo done",
+        "rg --type py User",
+        "rg User src tests",
+        "grep User src/services/user_service.py",
+        "cat src/services/user_service.py src/db.py",
+        "tail -f app.log",
+        "cat README.md",
+        "git diff main...HEAD",
+        "git status -s",
     ]
-    for args in cases:
-        result = run_cli(args, sample_repo)
-        assert result.returncode == 0
-        assert result.stdout.strip() == args[-1]
+    for cmd in untouched:
+        assert rewrite_command(cmd) is None, f"unexpected rewrite: {cmd!r} → {rewrite_command(cmd)!r}"
 
 
 def test_hook_raw_escape_hatch(sample_repo):
@@ -332,13 +334,6 @@ def test_hook_raw_escape_hatch(sample_repo):
     assert proc.returncode == 0
     data = json.loads(proc.stdout)
     assert data["hookSpecificOutput"]["updatedInput"]["command"] == "cat src/services/user_service.py"
-
-
-def test_coach_recommends_better_semantic_command(sample_repo):
-    result = run_cli(["coach", "cat", "src/services/user_service.py"], sample_repo)
-    assert result.returncode == 0
-    assert "Better command:" in result.stdout
-    assert "codeward read src/services/user_service.py" in result.stdout
 
 
 def test_hook_does_not_fight_rtk_or_codeward_wrapped_commands(sample_repo):
@@ -434,34 +429,6 @@ def test_sqlite_cache_rebuilds_old_schema_and_persists_metadata(sample_repo):
     assert row == ("python_ast", "exact_range", "high")
 
 
-def test_run_dry_run_rewrites_for_agent_shell_shims(sample_repo):
-    result = run_cli(["run", "--dry-run", "--tool", "cat", "src/services/user_service.py"], sample_repo)
-    assert result.returncode == 0
-    assert result.stdout.strip() == "codeward read src/services/user_service.py"
-
-    passthrough = run_cli(["run", "--dry-run", "--tool", "git", "branch"], sample_repo)
-    assert passthrough.returncode == 0
-    assert passthrough.stdout.strip() == "git branch"
-
-
-def test_init_agent_installs_path_shims_and_agent_instructions(sample_repo):
-    result = run_cli(["init-agent"], sample_repo)
-    assert result.returncode == 0
-    assert "Installed Codeward agent shims" in result.stdout
-
-    shim = sample_repo / ".codeward" / "bin" / "cat"
-    assert shim.exists()
-    assert shim.stat().st_mode & 0o111
-    assert "codeward run --tool cat" in shim.read_text()
-
-    agents = sample_repo / "AGENTS.md"
-    text = agents.read_text()
-    assert "Codex" in text
-    assert "Gemini" in text
-    assert "export PATH=\"$PWD/.codeward/bin:$PATH\"" in text
-    assert "codeward run --tool" in text
-
-
 def test_raw_escape_does_not_auto_allow_claude_permissions(sample_repo):
     payload = {"tool_input": {"command": "!raw git diff"}}
     proc = subprocess.run(
@@ -477,17 +444,6 @@ def test_raw_escape_does_not_auto_allow_claude_permissions(sample_repo):
     out = data["hookSpecificOutput"]
     assert out["updatedInput"]["command"] == "git diff"
     assert "permissionDecision" not in out
-
-
-def test_init_agent_updates_marked_agents_block_without_duplication(sample_repo):
-    agents = sample_repo / "AGENTS.md"
-    agents.write_text("# Existing\n\n<!-- codeward-shims:start -->\nold\n<!-- codeward-shims:end -->\n")
-    result = run_cli(["init-agent", "--bin-dir", ".alt/bin"], sample_repo)
-    assert result.returncode == 0
-    text = agents.read_text()
-    assert text.count("<!-- codeward-shims:start -->") == 1
-    assert "old" not in text
-    assert "export PATH=\"$PWD/.alt/bin:$PATH\"" in text
 
 
 def test_security_randomness_only_flags_sensitive_context(sample_repo):
@@ -543,15 +499,6 @@ def test_status_defers_to_rtk_when_installed(sample_repo, tmp_path):
     )
     assert forced.returncode == 0
     assert "deferring to RTK" not in forced.stdout
-
-
-def test_savings_command_reports_estimated_token_reduction(sample_repo):
-    result = run_cli(["savings", "--no-history", "--command", "cat src/services/user_service.py", "--command", "find . -maxdepth 3 -type f"], sample_repo)
-    assert result.returncode == 0
-    assert "Codeward savings analysis" in result.stdout
-    assert "Total saved:" in result.stdout
-    assert "cat src/services/user_service.py" in result.stdout
-    assert "codeward read src/services/user_service.py" in result.stdout
 
 
 def test_hook_rewritten_commands_record_token_savings(sample_repo):
@@ -713,27 +660,6 @@ def test_init_hook_both_skip_flags_errors(sample_repo, tmp_path):
     result = subprocess.run(cmd, cwd=sample_repo, text=True, capture_output=True, env=env)
     assert result.returncode == 2
     assert "cannot both be set" in result.stderr
-
-
-def test_init_agent_refuses_when_rtk_present(sample_repo, tmp_path):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    rtk_stub = fake_bin / "rtk"
-    rtk_stub.write_text("#!/usr/bin/env bash\necho rtk-stub\n")
-    rtk_stub.chmod(0o755)
-    env = {"PYTHONPATH": str(SRC), "PATH": f"{fake_bin}:/usr/bin:/bin"}
-    refused = subprocess.run(
-        [sys.executable, "-m", "codeward.cli", "init-agent"],
-        cwd=sample_repo, text=True, capture_output=True, env=env,
-    )
-    assert refused.returncode == 1
-    assert "RTK is active" in refused.stderr
-    forced = subprocess.run(
-        [sys.executable, "-m", "codeward.cli", "init-agent", "--force"],
-        cwd=sample_repo, text=True, capture_output=True, env=env,
-    )
-    assert forced.returncode == 0
-    assert (sample_repo / ".codeward" / "bin" / "cat").exists()
 
 
 def test_doctor_reports_rtk_and_hook_position(sample_repo, tmp_path):
