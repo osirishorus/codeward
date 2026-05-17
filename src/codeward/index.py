@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import hashlib
 import io
 import os
 import re
@@ -39,6 +40,8 @@ TEST_PATTERNS = [
 ]
 TEST_DIR_SEGMENTS = {"tests", "test", "__tests__", "spec", "specs"}
 IGNORE_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", "target", ".next", ".cache"}
+CACHE_SCHEMA_VERSION = "2"
+ANALYZER_VERSION = "2026-05-17"
 
 
 @dataclass
@@ -101,6 +104,7 @@ class RepoIndex:
         # Per-repo overrides loaded from .codeward/config.toml. Falls back to
         # module-level defaults when no config file is present.
         self.config = load_repo_config(self.root)
+        self._cache_config_hash = config_fingerprint(self.root)
         self.ignore_dirs = IGNORE_DIRS | set(self.config.get("ignore_dirs", []))
         self.test_patterns = list(TEST_PATTERNS) + list(self.config.get("extra_test_patterns", []))
         self.extra_test_dirs = set(self.config.get("extra_test_dirs", []))
@@ -179,9 +183,20 @@ class RepoIndex:
         con = sqlite3.connect(db_path)
         try:
             tables = {row[0] for row in con.execute("select name from sqlite_master where type='table'")}
-            if "resolved_deps" not in tables:
-                # Old cache format without resolved_deps — force a rebuild.
+            if "resolved_deps" not in tables or "metadata" not in tables:
+                # Old cache format — force a rebuild.
                 raise sqlite3.Error("cache schema outdated")
+            metadata = {
+                key: value
+                for key, value in con.execute("select key, value from metadata")
+            }
+            expected = {
+                "schema_version": CACHE_SCHEMA_VERSION,
+                "analyzer_version": ANALYZER_VERSION,
+                "config_hash": self._cache_config_hash,
+            }
+            if any(metadata.get(key) != value for key, value in expected.items()):
+                raise sqlite3.Error("cache metadata stale")
             sym_cols = {row[1] for row in con.execute("pragma table_info(symbols)")}
             file_cols = {row[1] for row in con.execute("pragma table_info(files)")}
             if not {"analyzer", "precision", "confidence"} <= file_cols:
@@ -517,13 +532,23 @@ class RepoIndex:
                 drop table if exists routes;
                 drop table if exists side_effects;
                 drop table if exists resolved_deps;
+                drop table if exists metadata;
                 create table files(path text primary key, lang text not null, lines integer not null, is_test integer not null, analyzer text not null default 'regex', precision text not null default 'heuristic', confidence text not null default 'low');
                 create table imports(file text not null, name text not null);
                 create table symbols(file text not null, name text not null, kind text not null, line integer not null, methods text not null, signature text not null default '', end_line integer not null default 0, analyzer text not null default 'regex', precision text not null default 'heuristic', confidence text not null default 'low');
                 create table routes(file text not null, route text not null, handler text not null);
                 create table side_effects(file text not null, label text not null);
                 create table resolved_deps(file text not null, dep text not null);
+                create table metadata(key text primary key, value text not null);
                 """
+            )
+            con.executemany(
+                "insert into metadata(key, value) values (?, ?)",
+                [
+                    ("schema_version", CACHE_SCHEMA_VERSION),
+                    ("analyzer_version", ANALYZER_VERSION),
+                    ("config_hash", self._cache_config_hash),
+                ],
             )
             for info in self.files.values():
                 con.execute(
@@ -730,6 +755,15 @@ def is_test_file(path: str, *, extra_dirs: set[str] | None = None, extra_pattern
     return bool(parts & test_dirs)
 
 
+def config_fingerprint(root: Path) -> str:
+    cfg_path = root / ".codeward" / "config.toml"
+    try:
+        data = cfg_path.read_bytes()
+    except OSError:
+        return "missing"
+    return hashlib.sha256(data).hexdigest()
+
+
 def load_repo_config(root: Path) -> dict:
     """Load .codeward/config.toml. Returns flat dict with these keys:
     - ignore_dirs: list[str] (added to IGNORE_DIRS for indexing)
@@ -821,7 +855,8 @@ def analyze_file(path: str, text: str, *, custom_side_effect_rules: list[tuple] 
             _extract_imports_only(info, text)
         else:
             analyze_generic(info, text)
-    info.routes = extract_routes(text)
+    route_scan = strip_comments_and_docstrings(text, info.lang)
+    info.routes = extract_routes(route_scan)
     info.side_effects = extract_side_effects(text, info.lang, extra_rules=custom_side_effect_rules)
     return info
 

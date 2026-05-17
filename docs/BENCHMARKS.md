@@ -1,4 +1,6 @@
-# Codeward benchmarks (v0.3.0)
+# Codeward benchmarks (historical v0.3.0 runs)
+
+These measurements are retained as historical evidence for the original symbol-command and hook work. Re-run this document before using it as a current v0.5.x release benchmark.
 
 Real-world A/B comparisons against baseline (raw shell only). Same prompt, same model per agent, same `--max-turns`. Three configurations:
 

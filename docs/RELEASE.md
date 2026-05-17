@@ -15,6 +15,7 @@ rm -rf .codeward .claude
 ```bash
 python3 -m pip install -e .
 codeward --help
+codeward --version
 python3 -m pytest tests/ -q
 ```
 
@@ -28,14 +29,14 @@ python3 -m build
 python3 -m twine check dist/*
 ```
 
-Confirm both `dist/codeward_agent-X.Y.Z.tar.gz` and `dist/codeward_agent-X.Y.Z-py3-none-any.whl` are produced and pass `twine check`.
+Confirm both `dist/codeward-X.Y.Z.tar.gz` and `dist/codeward-X.Y.Z-py3-none-any.whl` are produced and pass `twine check`.
 
 ## 4. Smoke-test in a fresh venv
 
 ```bash
 python3 -m venv /tmp/codeward-test
 source /tmp/codeward-test/bin/activate
-pip install dist/codeward_agent-*.whl
+pip install dist/codeward-*.whl
 codeward --version
 codeward --help
 deactivate
@@ -61,7 +62,7 @@ Expected: semantic output, working slice, savings recorded.
 ## 6. Tag release
 
 ```bash
-git tag -a v0.3.0 -m "Codeward v0.3.0 — Phase B/C/D"
+git tag -a v0.5.2 -m "Codeward v0.5.2"
 git push origin main --tags
 ```
 

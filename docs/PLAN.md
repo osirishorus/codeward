@@ -18,7 +18,7 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 - `codeward impact [--changed | <target>]` — dependents + tests + risk
 - `codeward review [--changed] [--security]` — pre-commit semantic + heuristic security review
 - `codeward api <file-or-dir>` — public API surface only
-- `codeward routes [target] [--method] [--filter]` — framework-aware URL → handler mapping across FastAPI, Flask, Django, Express, NestJS, Spring, Gin, Actix, Rails, Laravel, ASP.NET Core
+- `codeward routes [target] [--method] [--filter] [--include-tests]` — framework-aware URL → handler mapping across FastAPI, Flask, Django, Express, NestJS, Spring, Gin, Actix, Rails, Laravel, ASP.NET Core
 
 ### Symbol-level
 - `codeward slice <Class.method>` — exact bytes via AST/tree-sitter ranges

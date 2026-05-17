@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,32 @@ def run_cli(args, cwd):
         cmd, cwd=cwd, text=True, capture_output=True,
         env={"PYTHONPATH": str(SRC), "HOME": str(cwd)},
     )
+
+
+def test_package_metadata_prepares_and_includes_runtime_dependencies(tmp_path):
+    """Release metadata must build and expose the runtime dependencies."""
+    import setuptools.build_meta as build_meta
+
+    metadata_dir = build_meta.prepare_metadata_for_build_wheel(str(tmp_path))
+    metadata = (tmp_path / metadata_dir / "METADATA").read_text()
+
+    assert "Name: codeward" in metadata
+    assert "Requires-Dist: tree-sitter" in metadata
+    assert "Requires-Dist: watchdog" in metadata
+
+
+def test_pytest_config_adds_src_to_pythonpath():
+    """The documented `python3 -m pytest tests/ -q` path should import codeward."""
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+
+    assert data["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
+
+
+def test_version_flag_reports_project_version(sample_repo):
+    result = run_cli(["--version"], sample_repo)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "codeward 0.5.2"
 
 
 @pytest.fixture
@@ -958,6 +985,28 @@ def test_config_toml_custom_side_effect_rule_fires(tmp_path):
     assert "Billing event" in result.stdout, result.stdout
 
 
+def test_config_change_invalidates_cached_side_effects(tmp_path):
+    """Changing config.toml must force a cache rebuild for stored side effects."""
+    from codeward.index import RepoIndex
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "billing.py").write_text(
+        "def charge_card(amount):\n    billing.charge(amount)\n    return True\n"
+    )
+    first = RepoIndex(tmp_path)
+    assert "Billing event" not in first.files["src/billing.py"].side_effects
+
+    (tmp_path / ".codeward").mkdir(exist_ok=True)
+    (tmp_path / ".codeward" / "config.toml").write_text(
+        '[[side_effects.custom_rules]]\n'
+        'pattern = "\\\\bbilling\\\\.charge\\\\s*\\\\("\n'
+        'label = "Billing event"\n'
+    )
+
+    second = RepoIndex(tmp_path)
+    assert "Billing event" in second.files["src/billing.py"].side_effects
+
+
 def test_config_toml_malformed_reported_by_doctor(tmp_path):
     """Doctor must surface malformed config rather than silently ignoring it."""
     (tmp_path / ".codeward").mkdir()
@@ -1576,6 +1625,37 @@ def test_routes_command_filter_and_method(tmp_path):
     assert {r["handler"] for r in only_post["routes"]} == {"create_item"}
     filtered = json.loads(run_cli(["routes", "--json", "--filter", "/users"], tmp_path).stdout)
     assert {r["handler"] for r in filtered["routes"]} == {"list_users"}
+
+
+def test_routes_excludes_test_files_by_default_and_can_include_them(tmp_path):
+    (tmp_path / "app.py").write_text(
+        '@router.get("/prod")\n'
+        'def prod_route(): pass\n'
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_routes.py").write_text(
+        '@router.get("/fixture")\n'
+        'def fixture_route(): pass\n'
+    )
+
+    default_payload = json.loads(run_cli(["routes", "--json"], tmp_path).stdout)
+    assert default_payload["include_tests"] is False
+    assert {r["path"] for r in default_payload["routes"]} == {"/prod"}
+
+    with_tests = json.loads(run_cli(["routes", "--json", "--include-tests"], tmp_path).stdout)
+    assert with_tests["include_tests"] is True
+    assert {r["path"] for r in with_tests["routes"]} == {"/prod", "/fixture"}
+
+
+def test_routes_ignore_comment_examples_in_source_files(tmp_path):
+    (tmp_path / "extractor.py").write_text(
+        '# Example only: urlpatterns = [path("docs/", views.docs)]\n'
+        'def helper():\n'
+        '    return None\n'
+    )
+
+    payload = json.loads(run_cli(["routes", "--json"], tmp_path).stdout)
+    assert payload["routes"] == []
 
 
 def test_find_symbol_fuzzy_is_case_insensitive(tmp_path):

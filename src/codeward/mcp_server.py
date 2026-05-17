@@ -173,6 +173,7 @@ def create_server():
         target: str | None = None,
         filter: str | None = None,
         method: str | None = None,
+        include_tests: bool = False,
     ) -> dict:
         """HTTP routes detected across the repo, mapped to handler symbols.
 
@@ -183,7 +184,7 @@ def create_server():
         """
         return _run(
             _cli.cmd_routes,
-            _ns(target=target, filter=filter, method=method),
+            _ns(target=target, filter=filter, method=method, include_tests=include_tests),
         )
 
     # ---- Diff / change-aware -------------------------------------------

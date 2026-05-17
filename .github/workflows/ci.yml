@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-build:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest build twine
+
+      - name: Smoke CLI
+        run: |
+          codeward --version
+          codeward --help
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package metadata
+        run: python -m twine check dist/*
+
+      - name: Smoke installed wheel
+        run: |
+          python -m venv /tmp/codeward-wheel-test
+          /tmp/codeward-wheel-test/bin/python -m pip install --upgrade pip
+          /tmp/codeward-wheel-test/bin/python -m pip install dist/codeward-*.whl
+          /tmp/codeward-wheel-test/bin/codeward --version
+          /tmp/codeward-wheel-test/bin/codeward --help

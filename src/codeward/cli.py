@@ -8,11 +8,26 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections import Counter
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 
 from .hooks import compact_test_output, estimate_tokens, gain, hook_response, record
 from .index import RepoIndex, extract_security_findings, extract_side_effects, is_test_file
+
+
+def codeward_version() -> str:
+    try:
+        return package_version("codeward")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        try:
+            data = tomllib.loads(pyproject.read_text())
+            return str(data["project"]["version"])
+        except (OSError, KeyError, tomllib.TOMLDecodeError):
+            return "unknown"
+
 
 def fmt_list(title: str, items: list[str], empty: str = "none") -> list[str]:
     lines = [title + ":"]
@@ -291,15 +306,16 @@ def cmd_routes(args) -> int:
     target = getattr(args, "target", None)
     filt = (getattr(args, "filter", None) or "").lower()
     only_method = (getattr(args, "method", None) or "").upper().strip()
+    include_tests = bool(getattr(args, "include_tests", False))
 
     if target:
         target = target.replace("\\", "/")
         if target in idx.files:
-            file_iter = [target]
+            candidate_files = [target]
         else:
             prefix = target.rstrip("/") + "/"
-            file_iter = sorted(p for p in idx.files if p == target or p.startswith(prefix))
-        if not file_iter:
+            candidate_files = sorted(p for p in idx.files if p == target or p.startswith(prefix))
+        if not candidate_files:
             msg = f"No files matched: {target}"
             if json_mode:
                 print(json.dumps({"command": "routes", "target": target, "error": msg}, indent=2))
@@ -307,7 +323,11 @@ def cmd_routes(args) -> int:
                 print(msg, file=sys.stderr)
             return 2
     else:
-        file_iter = list(idx.files.keys())
+        candidate_files = list(idx.files.keys())
+    file_iter = [
+        rel for rel in candidate_files
+        if include_tests or not idx.is_test_file(rel)
+    ]
 
     rows: list[dict] = []
     for rel in file_iter:
@@ -336,7 +356,7 @@ def cmd_routes(args) -> int:
             })
 
     rows.sort(key=lambda r: (r["path"], r["method"]))
-    payload = {"command": "routes", "target": target, "count": len(rows), "routes": rows}
+    payload = {"command": "routes", "target": target, "include_tests": include_tests, "count": len(rows), "routes": rows}
     out = [f"# Codeward routes ({len(rows)})"]
     if not rows:
         out.append("No routes detected. Tip: extract patterns are framework-aware; metaprogrammed routes may not register.")
@@ -2327,6 +2347,7 @@ def cmd_init(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="codeward", description="Semantic codebase intelligence for coding agents")
+    p.add_argument("--version", action="version", version=f"%(prog)s {codeward_version()}")
     # Parent parser provides --json to every read-only command. Stable schema
     # documented in docs/JSON_SCHEMA.md. Programmatic clients (CI tools, MCP
     # servers, IDE plugins) should prefer this over scraping text output.
@@ -2368,6 +2389,7 @@ def build_parser() -> argparse.ArgumentParser:
     ro.add_argument("target", nargs="?", help="Optional file or directory to limit the scan to")
     ro.add_argument("--filter", help="Substring-match the path")
     ro.add_argument("--method", help="Filter to a single HTTP method (GET, POST, …)")
+    ro.add_argument("--include-tests", action="store_true", help="Include routes declared in test files/fixtures")
     ro.set_defaults(func=cmd_routes)
     wt = sub.add_parser("watch")
     wt.add_argument("--debounce", type=float, default=0.5, help="Coalesce file events within this many seconds (default: 0.5)")

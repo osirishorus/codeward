@@ -11,7 +11,7 @@ python3 -m pip install -e .
 python3 -m pytest -q
 ```
 
-Codeward intentionally has no runtime dependencies beyond the Python standard library.
+Codeward is local-only, but it does ship runtime dependencies for tree-sitter language coverage and watch mode. The MCP server remains an optional extra.
 
 ## Test expectations
 

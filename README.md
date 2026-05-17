@@ -127,9 +127,10 @@ Routes also show up in `preflight` output when the file you're editing declares 
 codeward callgraph "POST /api/users"
 codeward routes --filter /admin --method POST
 codeward routes src/api/                  # limit to one directory
+codeward routes --include-tests          # include fixture/test declarations
 ```
 
-Pattern-based — metaprogrammed routes (factories, dynamic registration) won't always register. Open an issue with a sample if you hit a gap.
+Pattern-based — metaprogrammed routes (factories, dynamic registration) won't always register. Test files are skipped by default so fixture routes do not pollute production route maps; pass `--include-tests` when you want those. Open an issue with a sample if you hit a gap.
 
 ## Commands
 
@@ -148,7 +149,7 @@ All read-only commands support `--json`.
 | `codeward tests-for <target>` | Likely covering tests | guessing |
 | `codeward impact [--changed\|<target>]` | Dependents + tests + risk | manual review |
 | `codeward preflight <file>` | "What to know before editing this" — see [above](#preflight-blast-radius-context-before-edits) | n/a |
-| `codeward routes [target]` | Framework-aware URL → handler mapping — see [above](#routes-framework-aware-url--handler-mapping) | grep across decorator files |
+| `codeward routes [target] [--include-tests]` | Framework-aware URL → handler mapping — see [above](#routes-framework-aware-url--handler-mapping) | grep across decorator files |
 | `codeward budget [target]` | Token hotspot audit + cheaper command recommendations | blind `cat`/`find` exploration |
 | `codeward pack <target>` | Budgeted context bundle for a file/dir/symbol/query | dumping many files into context |
 | `codeward diff-pack [--changed] [--base <ref>]` | Budgeted changed-code bundle for branch understanding/review | raw diff spelunking |
@@ -194,7 +195,7 @@ pattern = '\baudit_log\s*\('
 label = "Audit log"
 ```
 
-Full schema (~12 keys across `[index]`, `[side_effects]`, `[security]`, `[preflight]`): [docs/CONFIG.md](docs/CONFIG.md).
+Full schema: [docs/CONFIG.md](docs/CONFIG.md).
 
 ## JSON output
 

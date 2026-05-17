@@ -142,6 +142,29 @@ If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallb
 }
 ```
 
+## `codeward routes --json [target] [--include-tests]`
+
+```json
+{
+  "command": "routes",
+  "target": null,
+  "include_tests": false,
+  "count": 1,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/users",
+      "handler": "list_users",
+      "declared_in": "src/api/users.py",
+      "framework_lang": "Python",
+      "handler_location": {"file": "src/api/users.py", "line": 12, "kind": "function", "signature": "def list_users()"}
+    }
+  ]
+}
+```
+
+Test files are excluded by default; pass `--include-tests` to include fixture routes.
+
 ## `codeward preflight --json <file>`
 
 ```json

@@ -13,7 +13,6 @@ keywords = ["claude", "claude-code", "codex", "cursor", "ai", "agent", "llm", "r
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -25,12 +24,6 @@ classifiers = [
   "Operating System :: MacOS",
 ]
 authors = [{name = "osirishorus"}]
-
-[project.urls]
-Homepage      = "https://github.com/osirishorus/codeward"
-Documentation = "https://github.com/osirishorus/codeward#readme"
-Issues        = "https://github.com/osirishorus/codeward/issues"
-Changelog     = "https://github.com/osirishorus/codeward/blob/main/CHANGELOG.md"
 dependencies = [
   "tree-sitter>=0.23",
   # Core code languages with first-class symbol extraction.
@@ -60,6 +53,12 @@ dependencies = [
   "watchdog>=4.0",
 ]
 
+[project.urls]
+Homepage      = "https://github.com/osirishorus/codeward"
+Documentation = "https://github.com/osirishorus/codeward#readme"
+Issues        = "https://github.com/osirishorus/codeward/issues"
+Changelog     = "https://github.com/osirishorus/codeward/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 # Backward-compatible alias: these packages are part of the default install in
 # v0.4+, so `codeward[full]` remains valid but adds nothing.
@@ -79,6 +78,7 @@ codeward = "codeward.cli:main"
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
