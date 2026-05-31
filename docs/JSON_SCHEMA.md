@@ -204,6 +204,71 @@ Test files are excluded by default; pass `--include-tests` to include fixture ro
 
 `risk` is one of `LOW`, `MEDIUM`, `HIGH`. `hotspot` is `true` when the file is in the top decile of recent (90d) churn with a 3-commit floor; risk is bumped to `HIGH` for hotspots regardless of dependent count. `commits_90d` is the file's commit count in the last 90 days (0 in non-git directories).
 
+## `codeward affected --json [--changed | <target>] [--depth N]`
+
+```json
+{
+  "command": "affected",
+  "seeds": ["src/db.py"],
+  "affected_files": ["src/db.py", "src/services/user_service.py", "src/controllers/user_controller.py"],
+  "tests": ["tests/test_user_service.py"],
+  "runner": "pytest",
+  "test_command": "pytest tests/test_user_service.py",
+  "stats": {"seed_count": 1, "affected_count": 3, "test_count": 1}
+}
+```
+
+`affected_files` is the transitive closure of the seeds over the reverse-dependency graph (every file that directly or indirectly imports a seed), capped at `--depth` hops when given. `runner` is the detected test runner (`pytest`, `jest`, `vitest`, `go`, `npm`, or `null`). `test_command` is empty when no indexed file is affected; for non-pytest runners it falls back to the full-suite command. `--tests-only` prints just `test_command` as plain text (no JSON).
+
+## `codeward why --json <fileA> <fileB> [--direction forward|reverse|any]`
+
+```json
+{
+  "command": "why",
+  "src": "src/routes/user_routes.py",
+  "dst": "src/db.py",
+  "direction": "forward",
+  "path": ["src/routes/user_routes.py", "src/controllers/user_controller.py", "src/services/user_service.py", "src/db.py"],
+  "hops": 3,
+  "connected": true
+}
+```
+
+`path` is the shortest dependency chain (inclusive of both endpoints) or `null` when unconnected; `connected` and `hops` track the same. `direction` echoes the direction that connected them (`forward` = src imports dst; `reverse` = dst imports src). When unconnected, `direction` echoes the requested mode.
+
+## `codeward dead --json [target] [--min-confidence low|medium|high] [--include-public]`
+
+```json
+{
+  "command": "dead",
+  "target": null,
+  "min_confidence": "medium",
+  "include_public": false,
+  "dead_symbols": [
+    {"name": "_orphaned_helper", "kind": "function", "file": "src/services/user_service.py", "line": 12,
+     "analyzer": "python_ast", "confidence": "high", "reason": "0 external references; not a route/entrypoint/test/public-API"}
+  ],
+  "excluded_counts": {"api": 2, "routes": 1, "entrypoints": 1, "tests": 7}
+}
+```
+
+`dead_symbols` are top-level functions/classes with zero references anywhere (same-file internal usages count, so private helpers stay off the list). `confidence` mirrors the analyzer: `high` (Python AST), `medium` (tree-sitter), `low` (regex); `--min-confidence` gates the floor (default `medium`). `excluded_counts` tallies otherwise-dead symbols skipped by category. Public (exported) symbols are excluded by default — pass `--include-public` to include them. Heuristic: dynamic dispatch / reflection cannot be detected.
+
+## `codeward owners --json [target | --changed] [--top N]`
+
+```json
+{
+  "command": "owners",
+  "files": ["src/services/user_service.py"],
+  "reviewers": [
+    {"author": "A", "email": "a@b.com", "weight": 342.0, "share": 0.41, "top_files": ["src/services/user_service.py"]}
+  ],
+  "weights": {"target": 1.0, "dependents": 0.4}
+}
+```
+
+`reviewers` are ranked by `weight` = blame lines on the target files (weight 1.0) plus blame lines on their direct dependents (weight 0.4); `share` is each reviewer's fraction of total weight. Aggregated by email for identity stability. `--no-dependents` blames only the target files; `--exclude-bots` drops bot authors. Empty `reviewers` in non-git directories.
+
 ## `codeward review --json [--changed | <target>] [--security]`
 
 ```json

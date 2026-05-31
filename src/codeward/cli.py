@@ -223,6 +223,17 @@ def cmd_preflight(args) -> int:
     return 0
 
 
+def _is_public_symbol(sym) -> bool:
+    """True when `sym` is part of a module's public API surface: a top-level
+    (non-method) symbol whose short name does not start with an underscore.
+    Shared by `cmd_api` (what does this export?) and `cmd_dead` (which
+    unreferenced symbols might still be used by external consumers?)."""
+    if sym.kind == "method":
+        return False  # methods are covered under their class
+    short = sym.name.split(".")[-1]
+    return not short.startswith("_")
+
+
 def cmd_api(args) -> int:
     """Public API surface of a file or directory: top-level non-underscore
     symbols only. Skips test files. Useful for 'what does this module export?'
@@ -251,10 +262,7 @@ def cmd_api(args) -> int:
         info = idx.files[f]
         public = []
         for s in info.symbols:
-            if s.kind == "method":
-                continue  # methods covered under their class
-            short = s.name.split(".")[-1]
-            if short.startswith("_"):
+            if not _is_public_symbol(s):
                 continue
             entry = {
                 "name": s.name, "kind": s.kind, "line": s.line, "end_line": s.end_line,
@@ -411,6 +419,50 @@ def cmd_sdiff(args) -> int:
     return 0
 
 
+def _blame_authors(file: str, start: int | None = None, end: int | None = None, *, cwd: Path | None = None) -> dict:
+    """Run `git blame --line-porcelain` over `file` (optionally a line range)
+    and aggregate authorship. Returns a dict:
+
+        {"ok": bool, "counts": {(author, email): lines}, "last_commit": sha,
+         "last_summary": str, "line_count": int, "returncode": int, "stderr": str}
+
+    Aggregating on (author, email) lets `cmd_owners` dedupe identities by email
+    while `cmd_blame` collapses back to author name for display. Shared so both
+    commands parse blame porcelain the same way."""
+    cwd = cwd or Path.cwd()
+    loc = [f"-L{start},{end}"] if (start is not None and end is not None) else []
+    cp = subprocess.run(
+        ["git", "blame", *loc, "--line-porcelain", "--", file],
+        cwd=cwd, text=True, capture_output=True,
+    )
+    if cp.returncode != 0:
+        return {"ok": False, "counts": {}, "last_commit": None, "last_summary": None,
+                "line_count": 0, "returncode": cp.returncode, "stderr": cp.stderr}
+    counts: dict[tuple[str, str], int] = {}
+    last_commit = last_summary = None
+    cur_author = cur_email = cur_sha = cur_summary = None
+    line_count = 0
+    for ln in cp.stdout.splitlines():
+        if ln.startswith("\t"):
+            if cur_author is not None:
+                key = (cur_author, cur_email or "")
+                counts[key] = counts.get(key, 0) + 1
+                line_count += 1
+                if last_commit != cur_sha:
+                    last_commit = cur_sha
+                    last_summary = cur_summary
+        elif ln.startswith("author-mail "):
+            cur_email = ln[12:].strip().strip("<>")
+        elif ln.startswith("author "):
+            cur_author = ln[7:].strip()
+        elif ln.startswith("summary "):
+            cur_summary = ln[8:].strip()
+        elif re.match(r"^[0-9a-f]{40,}\s+\d+\s+\d+", ln):
+            cur_sha = ln.split()[0][:8]
+    return {"ok": True, "counts": counts, "last_commit": last_commit, "last_summary": last_summary,
+            "line_count": line_count, "returncode": 0, "stderr": ""}
+
+
 def cmd_blame(args) -> int:
     """Aggregate `git blame` output by author over a symbol's line range.
     Replaces `git blame -L X,Y -- file.py` with `codeward blame Foo.bar`.
@@ -437,38 +489,20 @@ def cmd_blame(args) -> int:
         else:
             print(msg, file=sys.stderr)
         return 2
-    cp = subprocess.run(
-        ["git", "blame", f"-L{s.line},{s.end_line}", "--line-porcelain", "--", s.file],
-        cwd=Path.cwd(), text=True, capture_output=True,
-    )
-    if cp.returncode != 0:
-        msg = f"git blame failed: {cp.stderr.strip()}"
+    res = _blame_authors(s.file, s.line, s.end_line)
+    if not res["ok"]:
+        msg = f"git blame failed: {res['stderr'].strip()}"
         if json_mode:
             print(json.dumps({"command": "blame", "symbol": name, "error": msg}, indent=2))
         else:
             print(msg, file=sys.stderr)
-        return cp.returncode
+        return res["returncode"]
     authors: dict[str, int] = {}
-    last_commit = None
-    last_summary = None
-    current_author = None
-    current_sha = None
-    current_summary = None
-    line_count = 0
-    for ln in cp.stdout.splitlines():
-        if ln.startswith("\t"):
-            if current_author:
-                authors[current_author] = authors.get(current_author, 0) + 1
-                line_count += 1
-                if last_commit != current_sha:
-                    last_commit = current_sha
-                    last_summary = current_summary
-        elif ln.startswith("author "):
-            current_author = ln[7:].strip()
-        elif ln.startswith("summary "):
-            current_summary = ln[8:].strip()
-        elif re.match(r"^[0-9a-f]{40,}\s+\d+\s+\d+", ln):
-            current_sha = ln.split()[0][:8]
+    for (author, _email), n in res["counts"].items():
+        authors[author] = authors.get(author, 0) + n
+    last_commit = res["last_commit"]
+    last_summary = res["last_summary"]
+    line_count = res["line_count"]
     total = sum(authors.values()) or 1
     rows = sorted(((a, n, round(100*n/total, 1)) for a, n in authors.items()), key=lambda r: -r[1])
     payload = {
@@ -1109,6 +1143,338 @@ def cmd_review(args) -> int:
             "suggested_command": suggested,
             "semantic_risk_summary": semantic_risk_summary,
         }, indent=2))
+    else:
+        print("\n".join(out))
+    return 0
+
+
+def _resolve_repo_file(idx: RepoIndex, raw: str) -> str | None:
+    """Resolve a user-supplied path to an indexed file. Accepts an exact
+    repo-relative path or an unambiguous trailing-path suffix (so
+    `routing.py` resolves `fastapi/routing.py` when unique). Returns None
+    when there is no match or the suffix is ambiguous."""
+    raw = raw.replace("\\", "/")
+    if raw in idx.files:
+        return raw
+    matches = [p for p in idx.files if p == raw or p.endswith("/" + raw)]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _detect_test_runner(idx: RepoIndex) -> dict:
+    """Best-effort detection of the repo's test runner so `affected` can emit a
+    ready-to-run command. Returns {"runner", "suite"} where `suite` is the
+    full-suite fallback command. pytest is preferred when Python tests exist
+    because it accepts per-file paths; jest/go fall back to suite-level."""
+    root = idx.root
+    if any(t.endswith(".py") for t in idx.test_files) or any(
+        (root / f).exists() for f in ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
+    ):
+        return {"runner": "pytest", "suite": "pytest"}
+    pkg = root / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text())
+            blob = json.dumps({**data.get("devDependencies", {}), **data.get("dependencies", {}), **data.get("scripts", {})})
+            if "vitest" in blob:
+                return {"runner": "vitest", "suite": "npx vitest run"}
+            if "jest" in blob:
+                return {"runner": "jest", "suite": "npx jest"}
+        except (OSError, ValueError):
+            pass
+        return {"runner": "npm", "suite": "npm test"}
+    if any(p.endswith(".go") for p in idx.files):
+        return {"runner": "go", "suite": "go test ./..."}
+    return {"runner": None, "suite": None}
+
+
+def cmd_affected(args) -> int:
+    """CI test-selection: from the change set, walk the reverse-dependency
+    graph to every transitively impacted file, map those to covering tests,
+    and emit the minimal test set plus a ready-to-run command. Unlike
+    `impact` (single hop), this is the full transitive blast radius."""
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    seeds = selected_files(idx, args)
+    depth = getattr(args, "depth", None)
+    affected = idx.transitively_affected(seeds, max_depth=depth)
+    tests = sorted({t for f in affected for t in idx.tests_for(f)})
+    runner = _detect_test_runner(idx)
+    pytests = [t for t in tests if t.endswith(".py")]
+    # Base the command on `affected` (the indexed closure), not raw seeds:
+    # non-code changes (config, the .codeward cache itself) reach no indexed
+    # file and must not trigger a full-suite run.
+    if not affected:
+        test_command = ""
+    elif runner["runner"] == "pytest" and pytests:
+        test_command = "pytest " + " ".join(shlex.quote(t) for t in pytests)
+    elif runner["suite"]:
+        # Affected files exist but tests aren't per-file mappable (jest/go) or
+        # none were found: fall back to the full suite, never an empty string.
+        test_command = runner["suite"]
+    else:
+        test_command = ""
+    payload = {
+        "command": "affected",
+        "seeds": seeds,
+        "affected_files": affected,
+        "tests": tests,
+        "runner": runner["runner"],
+        "test_command": test_command,
+        "stats": {"seed_count": len(seeds), "affected_count": len(affected), "test_count": len(tests)},
+    }
+    if getattr(args, "tests_only", False) and not json_mode:
+        print(test_command)
+        return 0
+    out = ["# Codeward affected"]
+    if not seeds:
+        out.append("No changed files found.")
+    else:
+        out.append(f"Seeds ({len(seeds)}): " + ", ".join(seeds))
+        out += fmt_list(f"Affected files ({len(affected)})", affected)
+        out += fmt_list(f"Tests to run ({len(tests)})", tests)
+        out.append(f"Test command: {test_command or '(no runner detected)'}")
+    if json_mode:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print("\n".join(out))
+    return 0
+
+
+def cmd_why(args) -> int:
+    """Explain coupling between two files: the shortest import/dependency path
+    from fileA to fileB. `--direction forward` follows imports (A depends on
+    B); `reverse` follows importers (B depends on A); `any` (default) tries
+    forward then reverse."""
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    direction = getattr(args, "direction", None) or "any"
+    src = _resolve_repo_file(idx, args.fileA)
+    dst = _resolve_repo_file(idx, args.fileB)
+    err = None
+    if src is None:
+        err = f"No indexed file matched: {args.fileA}"
+    elif dst is None:
+        err = f"No indexed file matched: {args.fileB}"
+    if err:
+        if json_mode:
+            print(json.dumps({"command": "why", "error": err}, indent=2))
+        else:
+            print(err, file=sys.stderr)
+        return 2
+    path = None
+    used = None
+    if direction in ("forward", "any"):
+        path = idx.dependency_path(src, dst, direction="forward")
+        if path:
+            used = "forward"
+    if path is None and direction in ("reverse", "any"):
+        path = idx.dependency_path(src, dst, direction="reverse")
+        if path:
+            used = "reverse"
+    connected = path is not None
+    payload = {
+        "command": "why", "src": src, "dst": dst,
+        "direction": used or direction,
+        "path": path, "hops": (len(path) - 1) if path else None,
+        "connected": connected,
+    }
+    out = [f"# Codeward why: {src} → {dst}"]
+    if connected:
+        out.append(f"Connected ({used}, {len(path) - 1} hop{'s' if len(path) - 1 != 1 else ''}):")
+        out.append("  " + " → ".join(path))
+    else:
+        out.append(f"No dependency path between {src} and {dst} (direction={direction}).")
+    if json_mode:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print("\n".join(out))
+    return 0
+
+
+def _entrypoint_names(idx: RepoIndex) -> set[str]:
+    """Short function names that pyproject `[project.scripts]` registers as
+    console entrypoints (e.g. `codeward.cli:main` → `main`). These are
+    reachable from outside the repo and must not be flagged dead."""
+    names: set[str] = set()
+    pp = idx.root / "pyproject.toml"
+    if pp.exists():
+        try:
+            data = tomllib.loads(pp.read_text())
+            scripts = data.get("project", {}).get("scripts", {})
+            for v in scripts.values():
+                fn = str(v).split(":")[-1].strip()
+                if fn:
+                    names.add(fn.split(".")[-1])
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    return names
+
+
+def cmd_dead(args) -> int:
+    """Find top-level functions/classes with zero references outside their own
+    file — candidate dead code. Excludes route handlers, console entrypoints,
+    dunders, test files, and (by default) public-API symbols that external
+    consumers might import. Confidence-gated: high=Python AST, medium=tree-
+    sitter, low=regex. Heuristic — dynamic dispatch/reflection is undetectable."""
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    target = getattr(args, "target", None)
+    min_conf = getattr(args, "min_confidence", None) or "medium"
+    include_public = getattr(args, "include_public", False)
+
+    if target:
+        target = target.replace("\\", "/")
+        if target in idx.files:
+            matched = [target]
+        else:
+            prefix = target.rstrip("/") + "/"
+            matched = sorted(p for p in idx.files if p == target or p.startswith(prefix))
+        if not matched:
+            msg = f"No files matched: {target}"
+            if json_mode:
+                print(json.dumps({"command": "dead", "target": target, "error": msg}, indent=2))
+            else:
+                print(msg, file=sys.stderr)
+            return 2
+    else:
+        matched = sorted(idx.files.keys())
+
+    conf_rank = {"low": 0, "medium": 1, "high": 2}
+
+    def sym_conf(sym) -> str:
+        if sym.analyzer == "python_ast":
+            return "high"
+        if sym.analyzer == "tree_sitter":
+            return "medium"
+        return "low"
+
+    route_handlers: set[str] = set()
+    for info in idx.files.values():
+        for handler in info.routes.values():
+            route_handlers.add(handler)
+            route_handlers.add(handler.split(".")[-1].split("#")[-1])
+    entrypoints = _entrypoint_names(idx) | {"main", "cli", "run"}
+
+    excluded = {"api": 0, "routes": 0, "entrypoints": 0, "tests": 0}
+    dead: list[dict] = []
+    for rel in matched:
+        if idx.is_test_file(rel):
+            excluded["tests"] += 1
+            continue
+        info = idx.files[rel]
+        for sym in info.symbols:
+            if sym.kind == "method":
+                continue  # method-level deadness is noisier; v1 = top-level defs
+            short = sym.name.split(".")[-1]
+            if short.startswith("__") and short.endswith("__"):
+                continue
+            conf = sym_conf(sym)
+            if conf_rank[conf] < conf_rank[min_conf]:
+                continue
+            # references_to excludes the definition node itself for python_ast /
+            # tree_sitter, so any surviving hit is a genuine usage — including
+            # same-file internal callers, which correctly keeps private helpers
+            # off the dead list. A symbol with no hits anywhere is the candidate.
+            if idx.references_to(sym.name):
+                continue
+            # Unreferenced outside its own file — classify why it might survive.
+            if short in entrypoints:
+                excluded["entrypoints"] += 1
+                continue
+            if short in route_handlers or sym.name in route_handlers:
+                excluded["routes"] += 1
+                continue
+            if _is_public_symbol(sym) and not include_public:
+                excluded["api"] += 1
+                continue
+            dead.append({
+                "name": sym.name, "kind": sym.kind, "file": rel, "line": sym.line,
+                "analyzer": sym.analyzer, "confidence": conf,
+                "reason": "0 external references; not a route/entrypoint/test"
+                          + ("" if include_public else "/public-API"),
+            })
+    dead.sort(key=lambda d: (d["file"], d["line"]))
+    payload = {
+        "command": "dead", "target": target, "min_confidence": min_conf,
+        "include_public": include_public, "dead_symbols": dead, "excluded_counts": excluded,
+    }
+    out = [f"# Codeward dead symbols ({len(dead)})"]
+    if not dead:
+        out.append("No dead symbols found at this confidence threshold.")
+    else:
+        for d in dead:
+            out.append(f"- {d['kind']} {d['name']}  [{d['file']}:{d['line']}]  ({d['confidence']})")
+        out.append("Note: heuristic — dynamic dispatch / getattr / reflection can't be seen. Verify before deleting.")
+    if json_mode:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print("\n".join(out))
+    return 0
+
+
+def _is_bot_author(name: str, email: str) -> bool:
+    blob = f"{name} {email}".lower()
+    return any(b in blob for b in ["[bot]", "dependabot", "renovate", "github-action", "noreply@anthropic", "noreply@github"])
+
+
+def cmd_owners(args) -> int:
+    """Suggest reviewers for a file/change set by aggregating git blame
+    authorship across the target files and (weighted lower) their direct
+    dependents — the people whose code breaks if you change this. Aggregates
+    by email for identity stability."""
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    top = getattr(args, "top", None) or 3
+    include_dependents = not getattr(args, "no_dependents", False)
+    exclude_bots = getattr(args, "exclude_bots", False)
+    files = [f for f in selected_files(idx, args) if f in idx.files]
+    weights = {"target": 1.0, "dependents": 0.4}
+    agg: dict[str, dict] = {}
+    notes: list[str] = []
+
+    def add(file: str, weight: float) -> None:
+        res = _blame_authors(file, cwd=idx.root)
+        if not res["ok"]:
+            notes.append(f"no blame for {file}")
+            return
+        for (name, email), n in res["counts"].items():
+            if exclude_bots and _is_bot_author(name, email):
+                continue
+            key = email or name
+            e = agg.setdefault(key, {"name": name, "email": email, "weight": 0.0, "files": {}})
+            e["weight"] += n * weight
+            e["files"][file] = e["files"].get(file, 0) + n
+
+    for f in files:
+        add(f, weights["target"])
+        if include_dependents:
+            for dep in idx.dependents_of_file(f)[: top * 3]:
+                add(dep, weights["dependents"])
+
+    total_weight = sum(e["weight"] for e in agg.values()) or 1.0
+    reviewers = sorted(agg.values(), key=lambda e: -e["weight"])[:top]
+    rev_rows = [{
+        "author": e["name"], "email": e["email"],
+        "weight": round(e["weight"], 1),
+        "share": round(e["weight"] / total_weight, 3),
+        "top_files": [f for f, _ in sorted(e["files"].items(), key=lambda kv: -kv[1])[:3]],
+    } for e in reviewers]
+    payload = {"command": "owners", "files": files, "reviewers": rev_rows, "weights": weights}
+    out = [f"# Codeward owners ({len(files)} file(s))"]
+    if not files:
+        out.append("No target/changed files found.")
+    elif not rev_rows:
+        out.append("No git history / authors found.")
+    else:
+        for r in rev_rows:
+            files_str = ", ".join(r["top_files"])
+            out.append(f"  {r['share'] * 100:5.1f}%  {r['author']} <{r['email']}>  ({files_str})")
+    for n in notes:
+        out.append(f"  note: {n}")
+    if json_mode:
+        print(json.dumps(payload, indent=2, default=str))
     else:
         print("\n".join(out))
     return 0
@@ -2010,7 +2376,11 @@ def semantic_agents_block(rtk_present: bool) -> str:
         "- `codeward refs <symbol>` — confidence-ranked reference sites as file:line (replaces `grep -rn`).\n"
         "- `codeward blame <symbol>` — git blame aggregated by author over the symbol's range.\n"
         "- `codeward sdiff [--base ref]` — semantic diff: which symbols changed, not raw lines.\n"
-        "- `codeward api <file-or-dir>` — public API surface (top-level non-underscore symbols).\n\n"
+        "- `codeward api <file-or-dir>` — public API surface (top-level non-underscore symbols).\n"
+        "- `codeward affected [--changed | <file>]` — transitive blast radius of a change + the minimal tests to run.\n"
+        "- `codeward why <fileA> <fileB>` — shortest import/dependency path between two files.\n"
+        "- `codeward dead [target]` — top-level symbols with zero external references (candidate dead code).\n"
+        "- `codeward owners [target | --changed]` — suggest reviewers from git blame over the change set + its dependents.\n\n"
         "Use plain shell (or `!raw <cmd>` if a hook is configured) when you need exact byte-for-byte output.\n"
         f"{SEMANTIC_AGENTS_BLOCK_END}\n"
     )
@@ -2424,6 +2794,33 @@ def build_parser() -> argparse.ArgumentParser:
     nb.add_argument("--top", type=int, default=10, help="Number of neighbors to return (default: 10)")
     nb.add_argument("--max-commits", type=int, default=2000, help="Hard cap on commits scanned (default: 2000)")
     nb.set_defaults(func=cmd_neighbors)
+    af = sub.add_parser("affected", parents=[common], help="CI test-selection: transitive blast radius of a change + tests to run")
+    af.add_argument("target", nargs="?", help="A single file to seed from (default: git changed files)")
+    af.add_argument("--changed", action="store_true", help="Seed from working-tree changes (default when no target given)")
+    af.add_argument("--base", help="Diff against this ref instead of the working tree")
+    af.add_argument("--depth", type=int, default=None, help="Cap transitive hops from each seed (default: unbounded)")
+    af.add_argument("--tests-only", action="store_true", help="Print only the test command (for $(codeward affected --tests-only))")
+    af.set_defaults(func=cmd_affected)
+    wy = sub.add_parser("why", parents=[common], help="Shortest import/dependency path between two files")
+    wy.add_argument("fileA"); wy.add_argument("fileB")
+    wy.add_argument("--direction", choices=["forward", "reverse", "any"], default="any",
+                    help="forward = A imports B; reverse = B imports A; any (default) tries both")
+    wy.set_defaults(func=cmd_why)
+    dd = sub.add_parser("dead", parents=[common], help="Top-level symbols with no external references (candidate dead code)")
+    dd.add_argument("target", nargs="?", help="Limit to a file or directory prefix (default: whole repo)")
+    dd.add_argument("--min-confidence", dest="min_confidence", choices=["low", "medium", "high"], default="medium",
+                    help="Minimum analyzer confidence to report (default: medium; low includes regex guesses)")
+    dd.add_argument("--include-public", action="store_true",
+                    help="Also flag public (exported) symbols — skipped by default since external code may import them")
+    dd.set_defaults(func=cmd_dead)
+    ow = sub.add_parser("owners", parents=[common], help="Suggest reviewers from git blame over a file/change set + its dependents")
+    ow.add_argument("target", nargs="?", help="A single file (default: git changed files)")
+    ow.add_argument("--changed", action="store_true", help="Use working-tree changes")
+    ow.add_argument("--base", help="Diff against this ref instead of the working tree")
+    ow.add_argument("--top", type=int, default=3, help="Number of reviewers to return (default: 3)")
+    ow.add_argument("--no-dependents", action="store_true", help="Only blame the target files, not their dependents")
+    ow.add_argument("--exclude-bots", action="store_true", help="Drop bot authors (dependabot, [bot], CI agents)")
+    ow.set_defaults(func=cmd_owners)
     hk = sub.add_parser("hook"); hk.add_argument("--agent", choices=["claude", "cursor", "gemini", "codex", "generic"], default="claude"); hk.set_defaults(func=cmd_hook)
     init = sub.add_parser("init")
     init.add_argument("--hook", action="store_true", help="Also install Claude Code Bash hook (opt-in; orders before any RTK entry)")

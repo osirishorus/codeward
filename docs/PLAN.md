@@ -35,8 +35,14 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 ### Git-history awareness
 - `codeward hotspots [--since 90d] [--top N]` — files ranked by churn × dependents
 - `codeward neighbors <file>` — files that historically change together
+- `codeward owners [target | --changed]` — suggest reviewers from blame over the change set + its dependents
 - `codeward pack` / `diff-pack` include co-change neighbors
 - `codeward impact` flags high-churn files as hotspots
+
+### Cross-file reasoning
+- `codeward affected [--changed | <target>] [--depth N]` — transitive blast radius of a change + the minimal tests to run (CI test-selection)
+- `codeward why <fileA> <fileB>` — shortest import/dependency path between two files
+- `codeward dead [target]` — top-level symbols with zero external references (candidate dead code), confidence-gated
 
 ### Token-budget bundling
 - `codeward budget [target]` — token cost audit + cheaper command recommendations

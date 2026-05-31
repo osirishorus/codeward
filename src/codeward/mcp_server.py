@@ -268,6 +268,62 @@ def create_server():
             _ns(file=file, since=since, top=top, max_commits=max_commits),
         )
 
+    @mcp.tool()
+    def codeward_affected(
+        target: str | None = None,
+        changed: bool = False,
+        base: str | None = None,
+        depth: int | None = None,
+    ) -> dict:
+        """CI test-selection: the transitive blast radius of a change set plus
+        the minimal tests to run and a ready-to-run test command. Set
+        `changed=true` for working-tree changes or pass `target` for one file.
+        Walks the full reverse-dependency graph, not just direct dependents."""
+        return _run(
+            _cli.cmd_affected,
+            _ns(target=target, changed=changed, base=base, depth=depth, tests_only=False),
+        )
+
+    @mcp.tool()
+    def codeward_why(file_a: str, file_b: str, direction: str = "any") -> dict:
+        """Shortest import/dependency path between two files — explains why
+        they are coupled. `direction`: forward (A imports B), reverse (B
+        imports A), or any (default, tries both)."""
+        return _run(_cli.cmd_why, _ns(fileA=file_a, fileB=file_b, direction=direction))
+
+    @mcp.tool()
+    def codeward_dead(
+        target: str | None = None,
+        min_confidence: str = "medium",
+        include_public: bool = False,
+    ) -> dict:
+        """Top-level functions/classes with zero references outside their own
+        file — candidate dead code. Excludes routes/entrypoints/dunders/tests
+        and (unless `include_public=true`) public-API symbols. Heuristic:
+        dynamic dispatch/reflection is undetectable, so verify before deleting."""
+        return _run(
+            _cli.cmd_dead,
+            _ns(target=target, min_confidence=min_confidence, include_public=include_public),
+        )
+
+    @mcp.tool()
+    def codeward_owners(
+        target: str | None = None,
+        changed: bool = False,
+        base: str | None = None,
+        top: int = 3,
+        no_dependents: bool = False,
+        exclude_bots: bool = False,
+    ) -> dict:
+        """Suggest reviewers for a file/change set from git blame authorship
+        over the target files and (weighted lower) their dependents. Use to
+        answer "who should review this change?"."""
+        return _run(
+            _cli.cmd_owners,
+            _ns(target=target, changed=changed, base=base, top=top,
+                no_dependents=no_dependents, exclude_bots=exclude_bots),
+        )
+
     # ---- Token-budget / context packing --------------------------------
 
     @mcp.tool()

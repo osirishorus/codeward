@@ -1812,3 +1812,117 @@ def test_doctor_reports_codex_hook(sample_repo, tmp_path):
     assert doc.returncode == 0, doc.stderr
     assert "Codex hook" in doc.stdout
     assert "installed" in doc.stdout
+
+
+# ---- affected (CI test-selection) --------------------------------------
+
+def test_affected_walks_transitive_dependents_and_emits_pytest(sample_repo):
+    """Seeding from db.py must reach the whole import chain (service ->
+    controller -> routes) and select the test that imports the service —
+    transitivity beyond impact's single hop."""
+    d = json.loads(run_cli(["affected", "--json", "src/db.py"], sample_repo).stdout)
+    assert d["command"] == "affected"
+    affected = set(d["affected_files"])
+    assert {"src/db.py", "src/services/user_service.py",
+            "src/controllers/user_controller.py", "src/routes/user_routes.py"} <= affected
+    assert "tests/test_user_service.py" in d["tests"]
+    assert d["test_command"].startswith("pytest ")
+    assert "tests/test_user_service.py" in d["test_command"]
+
+
+def test_affected_depth_caps_transitive_walk(sample_repo):
+    """--depth 1 stops at direct dependents: db.py reaches the service but not
+    the controller two hops away."""
+    d = json.loads(run_cli(["affected", "--json", "--depth", "1", "src/db.py"], sample_repo).stdout)
+    affected = set(d["affected_files"])
+    assert "src/services/user_service.py" in affected
+    assert "src/controllers/user_controller.py" not in affected
+
+
+def test_affected_empty_change_set_is_safe(sample_repo):
+    """Clean tree + --changed => no seeds, empty command, exit 0 (never the
+    whole suite)."""
+    r = run_cli(["affected", "--json", "--changed"], sample_repo)
+    assert r.returncode == 0
+    d = json.loads(r.stdout)
+    assert d["affected_files"] == []
+    assert d["test_command"] == ""
+
+
+def test_affected_tests_only_prints_bare_command(sample_repo):
+    r = run_cli(["affected", "--tests-only", "src/db.py"], sample_repo)
+    assert r.returncode == 0
+    assert r.stdout.strip().startswith("pytest ")
+
+
+# ---- why (dependency path) ---------------------------------------------
+
+def test_why_finds_forward_dependency_path(sample_repo):
+    d = json.loads(run_cli(["why", "--json", "src/routes/user_routes.py", "src/db.py"], sample_repo).stdout)
+    assert d["connected"] is True
+    assert d["direction"] == "forward"
+    assert d["path"][0] == "src/routes/user_routes.py"
+    assert d["path"][-1] == "src/db.py"
+    assert "src/services/user_service.py" in d["path"]
+
+
+def test_why_reports_unconnected_pairs(sample_repo):
+    """emailer.py and db.py are both imported by the service but neither
+    imports the other — no path in either direction."""
+    d = json.loads(run_cli(["why", "--json", "src/emailer.py", "src/db.py"], sample_repo).stdout)
+    assert d["connected"] is False
+    assert d["path"] is None
+
+
+# ---- dead (unreferenced symbols) ---------------------------------------
+
+def test_dead_flags_unreferenced_private_function(sample_repo):
+    f = sample_repo / "src" / "services" / "user_service.py"
+    f.write_text(f.read_text() + "\n\ndef _orphaned_helper():\n    return 42\n")
+    d = json.loads(run_cli(["dead", "--json", "src/services/user_service.py"], sample_repo).stdout)
+    row = next((s for s in d["dead_symbols"] if s["name"] == "_orphaned_helper"), None)
+    assert row is not None, d
+    assert row["confidence"] == "high"  # python_ast
+
+
+def test_dead_keeps_internally_used_helpers_off_the_list(sample_repo):
+    """A private helper referenced elsewhere in its own file is NOT dead —
+    references_to counts same-file usages."""
+    f = sample_repo / "src" / "services" / "user_service.py"
+    f.write_text(
+        f.read_text()
+        + "\n\ndef _used_internally():\n    return 1\n\ndef caller_for_helper():\n    return _used_internally()\n"
+    )
+    d = json.loads(run_cli(["dead", "--json", "--include-public", "src/services/user_service.py"], sample_repo).stdout)
+    names = {s["name"] for s in d["dead_symbols"]}
+    assert "_used_internally" not in names
+
+
+def test_dead_excludes_public_by_default_but_includes_with_flag(sample_repo):
+    f = sample_repo / "src" / "services" / "user_service.py"
+    f.write_text(f.read_text() + "\n\ndef unused_public_func():\n    return 1\n")
+    default = json.loads(run_cli(["dead", "--json", "src/services/user_service.py"], sample_repo).stdout)
+    assert "unused_public_func" not in {s["name"] for s in default["dead_symbols"]}
+    assert default["excluded_counts"]["api"] >= 1
+    public = json.loads(run_cli(["dead", "--json", "--include-public", "src/services/user_service.py"], sample_repo).stdout)
+    assert "unused_public_func" in {s["name"] for s in public["dead_symbols"]}
+
+
+# ---- owners (reviewer suggestion) --------------------------------------
+
+def test_owners_ranks_blame_authors(sample_repo):
+    d = json.loads(run_cli(["owners", "--json", "src/services/user_service.py"], sample_repo).stdout)
+    assert d["command"] == "owners"
+    assert d["reviewers"], d
+    top = d["reviewers"][0]
+    assert top["author"] == "A"
+    assert top["email"] == "a@b.com"
+    # dependents (user_controller.py) contribute under the same author
+    assert "src/services/user_service.py" in top["top_files"]
+
+
+def test_owners_changed_uses_working_tree(sample_repo):
+    f = sample_repo / "src" / "db.py"
+    f.write_text(f.read_text() + "\n# touch\n")
+    d = json.loads(run_cli(["owners", "--json", "--changed"], sample_repo).stdout)
+    assert "src/db.py" in d["files"]

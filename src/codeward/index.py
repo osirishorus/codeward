@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tokenize
 import tomllib
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -461,6 +462,76 @@ class RepoIndex:
         deps: set[str] = set(self._inverse_deps.get(rel, set()))
         deps.discard(rel)
         return sorted(deps)
+
+    def transitively_affected(self, seeds: Iterable[str], *, max_depth: int | None = None) -> list[str]:
+        """Every file that transitively depends on any of `seeds`, via the
+        reverse-dependency graph (`_inverse_deps`). Seeds that are indexed
+        files are included in the result. `max_depth` caps the number of hops
+        from a seed (None = unbounded). Visited-set guards import cycles.
+
+        Used by `codeward affected` to turn a change set into the full blast
+        radius — `dependents_of_file` only answers the single-hop case."""
+        result: set[str] = set()
+        queue: deque[tuple[str, int]] = deque()
+        seen: set[str] = set()
+        for s in seeds:
+            s = s.replace("\\", "/")
+            if s in seen:
+                continue
+            seen.add(s)
+            if s in self.files:
+                result.add(s)
+            queue.append((s, 0))
+        while queue:
+            node, depth = queue.popleft()
+            if max_depth is not None and depth >= max_depth:
+                continue
+            for dependent in sorted(self._inverse_deps.get(node, set())):
+                if dependent in seen:
+                    continue
+                seen.add(dependent)
+                result.add(dependent)
+                queue.append((dependent, depth + 1))
+        return sorted(result)
+
+    def dependency_path(self, src: str, dst: str, *, direction: str = "forward") -> list[str] | None:
+        """Shortest path from `src` to `dst` over the dependency graph,
+        returned as an inclusive node list (or None if unconnected).
+
+        `forward` follows `resolved_deps` (src imports … imports dst).
+        `reverse` follows `_inverse_deps` (dst imports … imports src), so the
+        returned path still reads src→…→dst but explains reverse coupling.
+        BFS gives the shortest chain; visited-set guards cycles."""
+        src = src.replace("\\", "/")
+        dst = dst.replace("\\", "/")
+        if src not in self.files or dst not in self.files:
+            return None
+        if src == dst:
+            return [src]
+
+        def neighbors(node: str) -> list[str]:
+            if direction == "reverse":
+                return sorted(self._inverse_deps.get(node, set()))
+            info = self.files.get(node)
+            return list(info.resolved_deps) if info else []
+
+        prev: dict[str, str | None] = {src: None}
+        queue: deque[str] = deque([src])
+        while queue:
+            node = queue.popleft()
+            for nb in neighbors(node):
+                if nb in prev:
+                    continue
+                prev[nb] = node
+                if nb == dst:
+                    path: list[str] = []
+                    cur: str | None = dst
+                    while cur is not None:
+                        path.append(cur)
+                        cur = prev[cur]
+                    return list(reversed(path))
+                queue.append(nb)
+        return None
 
     def tests_for(self, target: str) -> list[str]:
         target = target.replace("\\", "/")

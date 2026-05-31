@@ -4,6 +4,20 @@ All notable changes to Codeward will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning after `0.1.0`.
 
+## [Unreleased]
+
+### Added
+
+- **`codeward affected [--changed | <target>] [--depth N]`** — CI test-selection. Walks the reverse-dependency graph transitively from the change set to every impacted file, maps those to covering tests, and emits the minimal test set plus a ready-to-run command (`pytest`/`jest`/`vitest`/`go` auto-detected). `--tests-only` prints just the command for `$(codeward affected --tests-only)` in CI. Unlike `impact` (single hop), this is the full transitive blast radius.
+- **`codeward why <fileA> <fileB> [--direction forward|reverse|any]`** — shortest import/dependency path between two files (BFS over the resolved-dependency graph). Explains transitive coupling; reports `connected: false` with `path: null` when there is no path either way.
+- **`codeward dead [target] [--min-confidence] [--include-public]`** — top-level functions/classes with zero references anywhere (same-file internal usages count, so private helpers stay off the list). Excludes route handlers, console entrypoints, dunders, and test files; public (exported) symbols are excluded by default since external consumers may import them (`--include-public` to include). Confidence-gated (`high` = Python AST, `medium` = tree-sitter, `low` = regex). Heuristic — dynamic dispatch / reflection is undetectable.
+- **`codeward owners [target | --changed] [--top N] [--no-dependents] [--exclude-bots]`** — suggests reviewers by aggregating `git blame` authorship over the target/changed files (weight 1.0) and their direct dependents (weight 0.4), ranked by weighted lines and deduped by email.
+- All four are exposed as MCP tools (`codeward_affected`, `codeward_why`, `codeward_dead`, `codeward_owners`) and support `--json`.
+
+### Changed
+
+- Extracted `_is_public_symbol` (shared by `api` + `dead`) and `_blame_authors` (shared by `blame` + `owners`); added `RepoIndex.transitively_affected` and `RepoIndex.dependency_path` graph primitives. No behavior change to existing commands.
+
 ## [0.5.2] - 2026-05-16
 
 ### Removed

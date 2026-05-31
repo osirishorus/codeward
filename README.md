@@ -25,6 +25,9 @@ Who wrote this method?             →  codeward blame APIRoute.get_route_handle
 What changed at the symbol level?  →  codeward sdiff --base HEAD~1
 What's the public API of this?     →  codeward api fastapi/applications.py
 What could break if I edit this?   →  codeward preflight fastapi/routing.py  (auto-injected on Edit/Write)
+Which tests should CI run?         →  codeward affected --changed
+Why do these two files couple?     →  codeward why fastapi/routing.py fastapi/applications.py
+Who should review this change?     →  codeward owners --changed
 ```
 
 Two headline features:
@@ -161,6 +164,9 @@ All read-only commands support `--json`.
 | `codeward diff-pack [--changed] [--base <ref>]` | Budgeted changed-code bundle for branch understanding/review | raw diff spelunking |
 | `codeward hotspots [--since 90d]` | Files ranked by churn × dependents — where bugs concentrate | `git log` + `wc -l` + intuition |
 | `codeward neighbors <file>` | Files that historically change together with `<file>` | scanning `git log --name-only` by hand |
+| `codeward affected [--changed\|<target>]` | Transitive blast radius of a change + the minimal tests to run (CI test-selection) | guessing which tests to run |
+| `codeward why <fileA> <fileB>` | Shortest import/dependency path between two files — explains coupling | tracing imports by hand |
+| `codeward owners [target\|--changed]` | Suggest reviewers from `git blame` over the change set + its dependents | scrolling `git blame` / guessing |
 
 ### Maturity varies by language
 
@@ -173,6 +179,7 @@ Precision depends on the analyzer for the file. `--json` output annotates each r
 | `codeward sdiff [--base <ref>]` | **Symbols** added/removed/changed | Python + tree-sitter languages |
 | `codeward api <file-or-dir>` | Public API surface (top-level non-underscore) | Python (`__all__` aware), TypeScript |
 | `codeward review [--changed] [--security]` | Pre-commit semantic + heuristic security review | All languages — security checks are pattern-based, not SAST |
+| `codeward dead [target]` | Top-level symbols with zero external references (candidate dead code) | Python AST → high; tree-sitter → medium; confidence-gated, reflection-blind |
 
 ### Operations & adapters
 
@@ -233,7 +240,7 @@ Add to your client's MCP config (Claude Desktop: `~/Library/Application Support/
 }
 ```
 
-All read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_routes`, `codeward_pack`, `codeward_diff_pack`, `codeward_impact`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
+All read-only Codeward commands (`codeward_map`, `codeward_read`, `codeward_search`, `codeward_symbol`, `codeward_routes`, `codeward_pack`, `codeward_diff_pack`, `codeward_impact`, `codeward_affected`, `codeward_why`, `codeward_dead`, `codeward_owners`, `codeward_hotspots`, `codeward_neighbors`, …) become first-class MCP tools the agent can call directly. No bespoke hook config per tool.
 
 **Native hooks (for the agents that have them):**
 
