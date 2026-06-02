@@ -31,6 +31,54 @@ function which(cmd) {
   return first ? first.trim() : null;
 }
 
+function canonicalPath(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+function executableNames(cmd) {
+  if (process.platform !== "win32") return [cmd];
+  if (path.extname(cmd)) return [cmd];
+  const exts = (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+    .split(";")
+    .map((ext) => ext.trim())
+    .filter(Boolean);
+  return exts.map((ext) => cmd + ext);
+}
+
+function isExecutableFile(candidate) {
+  try {
+    const stat = fs.statSync(candidate);
+    if (!stat.isFile()) return false;
+    if (process.platform !== "win32") fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findDistinctExecutable(cmd, ignoredPaths = []) {
+  const ignored = new Set(ignoredPaths.filter(Boolean).map(canonicalPath));
+  const direct = which(cmd);
+  if (direct && !ignored.has(canonicalPath(direct))) return direct;
+
+  const pathEnv = process.env.PATH || "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of executableNames(cmd)) {
+      const candidate = path.join(dir, name);
+      if (!isExecutableFile(candidate)) continue;
+      if (ignored.has(canonicalPath(candidate))) continue;
+      return candidate;
+    }
+  }
+
+  return direct && !ignored.has(canonicalPath(direct)) ? direct : null;
+}
+
 function pythonVersionOk(py) {
   const r = spawnSync(py, ["-c", "import sys; print(sys.version_info[0], sys.version_info[1])"], {
     encoding: "utf8",
@@ -82,7 +130,7 @@ function main() {
 
   // Already on PATH? Just exec it. Common after install or for users who
   // installed via pipx/pip directly and only `npx codeward` once.
-  const existing = which(PKG);
+  const existing = findDistinctExecutable(PKG, [__filename]);
   if (existing) {
     execCodeward(existing, args);
     return;
@@ -106,7 +154,7 @@ function main() {
 
   // After install, the binary may live in pipx's bin dir or pip's --user
   // scripts dir. Re-check PATH first; otherwise probe the user scripts dir.
-  const fresh = which(PKG) || (function () {
+  const fresh = findDistinctExecutable(PKG, [__filename]) || (function () {
     const userBin = pyUserBin(py);
     if (!userBin) return null;
     const guess = path.join(userBin, process.platform === "win32" ? "codeward.exe" : "codeward");

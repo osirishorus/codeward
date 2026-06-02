@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import subprocess
@@ -183,6 +184,45 @@ def test_tests_for_file(sample_repo):
     assert result.returncode == 0
     assert "tests/test_user_service.py" in result.stdout
     assert "Suggested command:" in result.stdout
+
+
+def test_tests_for_symbol_uses_definition_file(sample_repo):
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text(target.read_text() + "\n\nclass BillingGateway:\n    pass\n")
+    result = run_cli(["tests-for", "BillingGateway"], sample_repo)
+    assert result.returncode == 0
+    assert "tests/test_user_service.py" in result.stdout
+    assert "Suggested command: pytest tests/test_user_service.py" in result.stdout
+
+
+def test_read_accepts_dot_prefixed_repo_path(sample_repo):
+    result = run_cli(["read", "./src/services/user_service.py"], sample_repo)
+    assert result.returncode == 0
+    assert "src/services/user_service.py" in result.stdout
+    assert "UserService" in result.stdout
+
+
+def test_preflight_accepts_dot_prefixed_repo_path(sample_repo):
+    result = run_cli(["preflight", "./src/services/user_service.py"], sample_repo)
+    assert result.returncode == 0
+    assert "# Codeward preflight: src/services/user_service.py" in result.stdout
+
+
+def test_affected_resolves_dot_prefixed_target(sample_repo):
+    result = run_cli(["affected", "./src/services/user_service.py"], sample_repo)
+    assert result.returncode == 0
+    assert "Seeds (1): src/services/user_service.py" in result.stdout
+    assert "tests/test_user_service.py" in result.stdout
+
+
+def test_slice_prefers_ranged_symbol_when_exact_match_is_ambiguous(sample_repo):
+    (sample_repo / "src" / "zzz_wrapper.js").write_text("function main() {}\n")
+    test_file = sample_repo / "tests" / "test_user_service.py"
+    test_file.write_text(test_file.read_text() + "\n\ndef main():\n    return 'python main'\n")
+    result = run_cli(["slice", "main"], sample_repo)
+    assert result.returncode == 0
+    assert "src/zzz_wrapper.js" not in result.stdout
+    assert "python main" in result.stdout
 
 
 def test_tests_for_file_avoids_short_stem_false_positives(sample_repo):
@@ -734,6 +774,32 @@ def safe():
     assert "possible hardcoded secret" not in result.stdout
 
 
+def test_security_findings_do_not_flag_yaml_safe_loader():
+    from codeward.index import extract_security_findings
+
+    text = "yaml.load(data, Loader=yaml.SafeLoader)\nyaml.load(other, Loader=SafeLoader)\n"
+    assert "unsafe yaml.load" not in extract_security_findings(text)
+
+
+def test_mcp_command_reports_install_guidance_when_extra_missing(monkeypatch, capsys):
+    from codeward.cli import cmd_mcp
+
+    real_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "mcp.server.fastmcp" or name.startswith("mcp."):
+            raise ImportError("no mcp")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    rc = cmd_mcp(argparse.Namespace(cwd=None))
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "pip install 'codeward[mcp]'" in captured.err
+
+
 def test_estimate_zero_for_missing_file_does_not_record(sample_repo):
     env = {"PYTHONPATH": str(SRC), "CODEWARD_ORIGINAL_COMMAND": "cat src/nonexistent_file.py", "HOME": str(sample_repo)}
     proc = subprocess.run(
@@ -1010,6 +1076,27 @@ def test_config_change_invalidates_cached_side_effects(tmp_path):
     assert "Billing event" in second.files["src/billing.py"].side_effects
 
 
+def test_cache_invalidates_when_source_mtime_equals_sqlite_mtime(tmp_path):
+    """A content change with the same mtime as the sqlite cache must not reuse stale data."""
+    from codeward.index import RepoIndex
+
+    (tmp_path / "src").mkdir()
+    target = tmp_path / "src" / "module.py"
+    target.write_text("def old_name():\n    return 1\n")
+
+    first = RepoIndex(tmp_path)
+    assert first.find_symbol("old_name")
+    cache = tmp_path / ".codeward" / "index.sqlite"
+    cache_mtime = cache.stat().st_mtime
+
+    target.write_text("def new_name():\n    return 2\n")
+    os.utime(target, (cache_mtime, cache_mtime))
+
+    second = RepoIndex(tmp_path)
+    assert second.find_symbol("new_name")
+    assert not second.find_symbol("old_name")
+
+
 def test_config_toml_malformed_reported_by_doctor(tmp_path):
     """Doctor must surface malformed config rather than silently ignoring it."""
     (tmp_path / ".codeward").mkdir()
@@ -1017,6 +1104,35 @@ def test_config_toml_malformed_reported_by_doctor(tmp_path):
     result = run_cli(["doctor"], tmp_path)
     assert "malformed" in result.stdout.lower(), result.stdout
     assert result.returncode != 0
+
+
+def test_treesitter_links_methods_for_all_class_like_container_kinds():
+    from codeward.analyzers.treesitter import _link_methods_to_classes
+    from codeward.index import FileInfo, Symbol
+
+    info = FileInfo("types.cpp", "C++", 1)
+    info.symbols = [
+        Symbol("Foo", "struct", "types.cpp", 1),
+        Symbol("Foo.bar", "method", "types.cpp", 2),
+        Symbol("Shape", "trait", "types.cpp", 4),
+        Symbol("Shape.draw", "method", "types.cpp", 5),
+        Symbol("Options", "union", "types.cpp", 7),
+        Symbol("Options.pick", "method", "types.cpp", 8),
+    ]
+
+    _link_methods_to_classes(info)
+
+    methods_by_name = {s.name: s.methods for s in info.symbols}
+    assert methods_by_name["Foo"] == ["bar"]
+    assert methods_by_name["Shape"] == ["draw"]
+    assert methods_by_name["Options"] == ["pick"]
+
+
+def test_treesitter_treats_cpp_style_h_header_as_cpp():
+    from codeward.analyzers.treesitter import language_for_path
+
+    text = "namespace app { class Foo { public: int bar(); }; }\n"
+    assert language_for_path("include/foo.h", text) == "cpp"
 
 
 def test_treesitter_extracts_go_symbols(tmp_path):
@@ -1058,6 +1174,32 @@ def test_treesitter_extracts_typescript_class_methods(tmp_path):
     assert console["end_line"] >= 4
     method_names = {m["name"] if isinstance(m, dict) else m for m in console.get("methods", [])}
     assert {"print", "write"} <= method_names
+
+
+def test_treesitter_java_extracts_nested_classes_and_records(tmp_path):
+    pytest.importorskip("tree_sitter_java")
+    (tmp_path / "Outer.java").write_text(
+        "class Outer { class Inner { void ping() {} } }\n"
+        "record User(String name) {}\n"
+    )
+    result = run_cli(["read", "--json", "Outer.java"], tmp_path)
+    assert result.returncode == 0
+    d = json.loads(result.stdout)
+    names = {s["name"] for s in d["symbols"]}
+    assert {"Outer", "Inner", "User"} <= names
+
+
+def test_treesitter_csharp_extracts_records(tmp_path):
+    pytest.importorskip("tree_sitter_c_sharp")
+    (tmp_path / "Models.cs").write_text(
+        "record User(string Name);\n"
+        "record struct Point(int X, int Y);\n"
+    )
+    result = run_cli(["read", "--json", "Models.cs"], tmp_path)
+    assert result.returncode == 0
+    d = json.loads(result.stdout)
+    names = {s["name"] for s in d["symbols"]}
+    assert {"User", "Point"} <= names
 
 
 @pytest.mark.parametrize(
@@ -1595,6 +1737,33 @@ def test_extract_routes_express_and_gin(tmp_path):
     er, gr = extract_routes(express), extract_routes(gin)
     assert er == {"GET /api/users": "getUsers", "POST /api/users": "createUser"}
     assert gr == {"GET /api/users": "GetUsers", "POST /api/users": "CreateUser"}
+
+
+def test_extract_routes_spring_request_mapping_method_and_aspnet_route():
+    from codeward.index import extract_routes
+
+    spring = '''
+@RequestMapping(value="/orders", method=RequestMethod.POST)
+public ResponseEntity<Order> save() {
+    return ok();
+}
+'''
+    aspnet = '''
+[Route("/status")]
+public IActionResult Status() {
+    return Ok();
+}
+'''
+
+    assert extract_routes(spring)["POST /orders"] == "save"
+    assert extract_routes(aspnet)["ANY /status"] == "Status"
+
+
+def test_extract_side_effects_detects_pathlib_write_helpers():
+    from codeward.index import extract_side_effects
+
+    text = 'from pathlib import Path\nPath("a.txt").write_text("hi")\nPath("b.bin").write_bytes(data)\n'
+    assert "Filesystem write" in extract_side_effects(text, "Python")
 
 
 def test_routes_command_lists_routes(tmp_path):

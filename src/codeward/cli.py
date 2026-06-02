@@ -159,11 +159,12 @@ def cmd_preflight(args) -> int:
     short — it has to fit into the agent's context budget for every edit."""
     idx = RepoIndex(Path.cwd())
     json_mode = getattr(args, "json_output", False)
-    rel = args.file.replace("\\", "/")
-    if rel not in idx.files:
-        msg = f"File not indexed: {rel}"
+    raw_file = args.file.replace("\\", "/")
+    rel = _resolve_repo_file(idx, raw_file)
+    if rel is None:
+        msg = f"File not indexed: {raw_file}"
         if json_mode:
-            print(json.dumps({"command": "preflight", "file": rel, "error": msg}, indent=2))
+            print(json.dumps({"command": "preflight", "file": raw_file, "error": msg}, indent=2))
         else:
             print(msg, file=sys.stderr)
         return 2
@@ -419,6 +420,24 @@ def cmd_sdiff(args) -> int:
     return 0
 
 
+def _best_ranged_symbol(symbols: list) -> object:
+    """Prefer symbols with usable source ranges, then higher-confidence analyzers."""
+    confidence_rank = {"low": 0, "medium": 1, "high": 2}
+    precision_rank = {"heuristic": 0, "syntactic": 1, "semantic": 2}
+    analyzer_rank = {"regex": 0, "tree_sitter": 1, "python_ast": 2}
+
+    def score(sym) -> tuple[int, int, int, int]:
+        has_range = int(bool(sym.end_line and sym.end_line >= sym.line))
+        return (
+            has_range,
+            confidence_rank.get(sym.confidence, 0),
+            precision_rank.get(sym.precision, 0),
+            analyzer_rank.get(sym.analyzer, 0),
+        )
+
+    return max(symbols, key=score)
+
+
 def _blame_authors(file: str, start: int | None = None, end: int | None = None, *, cwd: Path | None = None) -> dict:
     """Run `git blame --line-porcelain` over `file` (optionally a line range)
     and aggregate authorship. Returns a dict:
@@ -481,7 +500,7 @@ def cmd_blame(args) -> int:
         else:
             print(msg, file=sys.stderr)
         return 2
-    s = syms[0]
+    s = _best_ranged_symbol(syms)
     if not s.end_line or s.end_line < s.line:
         msg = f"Symbol {s.name} has no recorded end_line"
         if json_mode:
@@ -595,7 +614,7 @@ def cmd_slice(args) -> int:
         else:
             print(msg, file=sys.stderr)
         return 2
-    s = syms[0]
+    s = _best_ranged_symbol(syms)
     if not s.end_line or s.end_line < s.line:
         msg = f"Symbol {s.name} has no recorded end_line; reindex required"
         if json_mode:
@@ -632,12 +651,13 @@ def cmd_slice(args) -> int:
 
 def cmd_read(args) -> int:
     idx = RepoIndex(Path.cwd())
-    rel = args.file.replace("\\", "/")
-    if rel not in idx.files:
+    raw_file = args.file.replace("\\", "/")
+    rel = _resolve_repo_file(idx, raw_file)
+    if rel is None:
         if getattr(args, "json_output", False):
-            print(json.dumps({"command": "read", "error": f"File not indexed: {rel}"}, indent=2))
+            print(json.dumps({"command": "read", "error": f"File not indexed: {raw_file}"}, indent=2))
         else:
-            print(f"File not indexed: {rel}", file=sys.stderr)
+            print(f"File not indexed: {raw_file}", file=sys.stderr)
         return 2
     info = idx.files[rel]
     deps = idx.dependents_of_file(rel)
@@ -999,13 +1019,26 @@ def selected_files(idx: RepoIndex, args) -> list[str]:
     if getattr(args, "changed", False):
         return idx.changed_files(getattr(args, "base", None))
     if getattr(args, "target", None):
-        return [args.target]
+        target = args.target.replace("\\", "/")
+        resolved = _resolve_repo_file(idx, target)
+        if resolved:
+            return [resolved]
+        normalized = os.path.normpath(target).replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        prefix = normalized.rstrip("/") + "/"
+        return sorted(p for p in idx.files if p.startswith(prefix))
     return idx.changed_files(getattr(args, "base", None))
 
 
 def cmd_tests_for(args) -> int:
     idx = RepoIndex(Path.cwd())
-    tests = idx.tests_for(args.target)
+    target = args.target
+    rel = _resolve_repo_file(idx, target)
+    tests = idx.tests_for(rel or target)
+    if not tests and rel is None:
+        symbol_matches = idx.find_symbol(target) or idx.find_symbol_fuzzy(target)
+        tests = sorted({test for sym in symbol_matches for test in idx.tests_for(sym.file)})
     pytests = [t for t in tests if t.endswith(".py")]
     suggested = "pytest " + " ".join(shlex.quote(t) for t in pytests) if pytests else "run project test suite"
     out = [f"Likely tests for {args.target}:"]
@@ -1154,9 +1187,36 @@ def _resolve_repo_file(idx: RepoIndex, raw: str) -> str | None:
     `routing.py` resolves `fastapi/routing.py` when unique). Returns None
     when there is no match or the suffix is ambiguous."""
     raw = raw.replace("\\", "/")
-    if raw in idx.files:
-        return raw
-    matches = [p for p in idx.files if p == raw or p.endswith("/" + raw)]
+    candidates = [raw]
+    try:
+        p = Path(raw)
+        if p.is_absolute():
+            candidates.append(p.resolve().relative_to(idx.root.resolve()).as_posix())
+    except (OSError, ValueError):
+        pass
+    normalized = os.path.normpath(raw).replace("\\", "/")
+    if normalized != ".":
+        candidates.append(normalized)
+    if normalized.startswith("./"):
+        candidates.append(normalized[2:])
+    if raw.startswith("./"):
+        candidates.append(raw[2:])
+
+    seen: set[str] = set()
+    normalized_candidates = []
+    for candidate in candidates:
+        candidate = candidate.lstrip("/")
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            normalized_candidates.append(candidate)
+
+    for candidate in normalized_candidates:
+        if candidate in idx.files:
+            return candidate
+    matches = [
+        p for p in idx.files
+        if any(p == candidate or p.endswith("/" + candidate) for candidate in normalized_candidates)
+    ]
     if len(matches) == 1:
         return matches[0]
     return None

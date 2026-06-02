@@ -15,6 +15,7 @@ working.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 try:
@@ -112,8 +113,10 @@ def _get_parser(lang: str):
     return parser
 
 
-def language_for_path(path: str) -> str | None:
+def language_for_path(path: str, text: str | None = None) -> str | None:
     suffix = Path(path).suffix.lower()
+    if suffix == ".h" and text and _looks_like_cpp_header(text):
+        return "cpp"
     return {
         ".go": "go",
         ".rs": "rust",
@@ -134,8 +137,17 @@ def language_for_path(path: str) -> str | None:
     }.get(suffix)
 
 
+def _looks_like_cpp_header(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:class|namespace|template|constexpr|using)\b"
+        r"|::"
+        r"|\b(?:public|private|protected)\s*:",
+        text,
+    ))
+
+
 def parse_for_path(path: str, text: str):
-    lang = language_for_path(path)
+    lang = language_for_path(path, text)
     if lang is None:
         return None
     parser = _get_parser(lang)
@@ -155,7 +167,7 @@ def analyze_treesitter(info, text: str) -> bool:
     tree-sitter just gives us better symbol shapes."""
     if not HAS_TREE_SITTER:
         return False
-    lang = language_for_path(info.path)
+    lang = language_for_path(info.path, text)
     if lang is None:
         return False
     parser = _get_parser(lang)
@@ -208,7 +220,8 @@ def _link_methods_to_classes(info) -> None:
     (Go's `func (s *Server) Foo()`, Rust's separate `impl` blocks, Ruby's
     re-opening), attach method names to the parent class's `methods` list so
     `cmd_read` can render them grouped under the class."""
-    classes = {s.name: s for s in info.symbols if s.kind in ("class", "interface", "enum", "module")}
+    class_like = {"class", "interface", "enum", "module", "struct", "trait", "object", "extension", "union", "record"}
+    classes = {s.name: s for s in info.symbols if s.kind in class_like}
     for s in info.symbols:
         if s.kind != "method" or "." not in s.name:
             continue
@@ -424,8 +437,11 @@ def _extract_java(root, src: bytes, info, Symbol) -> None:
                 emit_class_like(c, "interface")
             elif c.type == "enum_declaration":
                 emit_class_like(c, "enum")
+            elif c.type == "record_declaration":
+                emit_class_like(c, "class")
             elif c.type in ("package_declaration", "import_declaration"):
                 continue
+            visit(c)
 
     visit(root)
 
@@ -835,11 +851,22 @@ def _extract_csharp(root, src: bytes, info, Symbol) -> None:
                 visit(c)
             elif c.type == "class_declaration":
                 emit_type(c, "class")
+                visit(c)
             elif c.type == "interface_declaration":
                 emit_type(c, "interface")
+                visit(c)
             elif c.type == "struct_declaration":
                 emit_type(c, "class")
+                visit(c)
+            elif c.type == "record_declaration":
+                emit_type(c, "class")
+                visit(c)
+            elif c.type == "record_struct_declaration":
+                emit_type(c, "class")
+                visit(c)
             elif c.type == "enum_declaration":
                 emit_type(c, "enum")
+            else:
+                visit(c)
 
     visit(root)

@@ -59,11 +59,12 @@ def test_create_server_registers_expected_tools():
         "codeward_callgraph", "codeward_tests_for", "codeward_impact",
         "codeward_review", "codeward_slice", "codeward_refs", "codeward_blame",
         "codeward_sdiff", "codeward_api", "codeward_preflight",
+        "codeward_routes", "codeward_affected", "codeward_why", "codeward_dead",
+        "codeward_owners",
         "codeward_hotspots", "codeward_neighbors", "codeward_pack",
         "codeward_budget", "codeward_doctor", "codeward_diff_pack",
     }
-    missing = expected - names
-    assert not missing, f"Missing MCP tools: {missing}"
+    assert names == expected
 
 
 def _spawn_mcp(cwd: Path) -> subprocess.Popen:

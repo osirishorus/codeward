@@ -166,7 +166,7 @@ class RepoIndex:
         except OSError:
             return False
         newest, current_files = self._source_file_state()
-        if newest > cache_mtime:
+        if newest >= cache_mtime:
             return False
         try:
             self._load_sqlite(db_path)
@@ -1184,6 +1184,10 @@ _ROUTES_ASPNET_RE = re.compile(
     r"\[Http(?P<method>Get|Post|Put|Patch|Delete|Head|Options)\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)\]"
     r"[\s\S]{0,200}?\b(?:public|private|protected|internal)\s+[\w<>\[\],?\s]*?\s+(?P<handler>[A-Za-z_]\w*)\s*\("
 )
+_ROUTES_ASPNET_ROUTE_RE = re.compile(
+    r"\[Route\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)\]"
+    r"[\s\S]{0,200}?\b(?:public|private|protected|internal)\s+[\w<>\[\],?\s]*?\s+(?P<handler>[A-Za-z_]\w*)\s*\("
+)
 
 
 def _add_route(routes: dict, method: str, path: str, handler: str) -> None:
@@ -1229,6 +1233,10 @@ def extract_routes(text: str) -> dict[str, str]:
     for m in _ROUTES_SPRING_RE.finditer(text):
         ann = m.group("ann")
         method = "ANY" if ann == "Request" else ann
+        if ann == "Request":
+            method_match = re.search(r"\bmethod\s*=\s*RequestMethod\.([A-Z]+)\b", m.group(0))
+            if method_match:
+                method = method_match.group(1)
         _add_route(routes, method, m.group("path"), m.group("handler"))
     for m in _ROUTES_GO_RE.finditer(text):
         _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
@@ -1244,6 +1252,8 @@ def extract_routes(text: str) -> dict[str, str]:
         _add_route(routes, m.group("method"), m.group("path"), handler)
     for m in _ROUTES_ASPNET_RE.finditer(text):
         _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
+    for m in _ROUTES_ASPNET_ROUTE_RE.finditer(text):
+        _add_route(routes, "ANY", m.group("path"), m.group("handler"))
     return routes
 
 
@@ -1285,7 +1295,8 @@ _SIDE_EFFECT_CHECKS = [
         r"|\bshell_exec\s*\(",
     ), "Shell execution"),
     (re.compile(
-        r"\b(?:open|Path\([^)]*\)\.write_text|Path\([^)]*\)\.write_bytes)\s*\([^)]*['\"][wax]\b"
+        r"\bopen\s*\([^)]*['\"][wax]\b"
+        r"|\bPath\([^)]*\)\.write_(?:text|bytes)\s*\("
         r"|\bshutil\.(?:copy|copy2|copyfile|copytree|rmtree|move)\s*\("
         r"|\bos\.(?:remove|unlink|rename|mkdir|makedirs|rmdir)\s*\(",
     ), "Filesystem write"),
@@ -1369,11 +1380,15 @@ def extract_security_findings(text: str, lang: str = "Python") -> list[str]:
         (r"\b(eval|exec)\s*\(", "unsafe eval/exec"),
         (r"subprocess\.[\w_]+\([^\n)]*shell\s*=\s*True", "shell=True command execution"),
         (r"(?i)pickle\.loads?\s*\(", "unsafe pickle deserialization"),
-        (r"(?i)yaml\.load\s*\([^\n)]*(Loader\s*=\s*yaml\.Loader|Loader\s*=\s*Loader)?", "unsafe yaml.load"),
     ]
     for pattern, label in checks:
         if re.search(pattern, scan):
             findings.append(label)
+    for call in re.finditer(r"(?is)\byaml\.load\s*\((?P<args>[^)]*)\)", scan):
+        args = call.group("args")
+        safe_loader = re.search(r"\bLoader\s*=\s*(?:yaml\.)?(?:CSafeLoader|SafeLoader)\b", args)
+        if not safe_loader:
+            findings.append("unsafe yaml.load")
     if re.search(r"(?i)random\.(random|randint|choice|choices)\s*\(", scan) and re.search(r"(?i)token|secret|password|salt|nonce|key|crypto", scan):
         findings.append("non-cryptographic randomness")
     return sorted(set(findings))

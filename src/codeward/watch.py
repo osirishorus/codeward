@@ -67,6 +67,19 @@ def _is_relevant_file(path: Path, root: Path) -> bool:
     return True
 
 
+def _event_paths(e, root: Path) -> set[str]:
+    if getattr(e, "is_directory", False):
+        return set()
+    paths: set[str] = set()
+    src_path = getattr(e, "src_path", None)
+    if src_path and _is_relevant_file(Path(src_path), root):
+        paths.add(str(src_path))
+    dest_path = getattr(e, "dest_path", None)
+    if dest_path and _is_relevant_file(Path(dest_path), root):
+        paths.add(str(dest_path))
+    return paths
+
+
 def _reindex_paths(idx: RepoIndex, root: Path, paths: set[str]) -> int:
     """Reanalyze the set of files. Returns count of files actually updated."""
     updated = 0
@@ -87,6 +100,10 @@ def _reindex_paths(idx: RepoIndex, root: Path, paths: set[str]) -> int:
         except OSError:
             continue
         if size > MAX_INDEXABLE_BYTES:
+            if rel in idx.files:
+                del idx.files[rel]
+                idx._text_cache.pop(rel, None)
+                updated += 1
             continue
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -138,11 +155,8 @@ def run_watch(root: Path, debounce: float = 0.5) -> int:
         def on_moved(self, e):
             self._maybe_schedule(e)
         def _maybe_schedule(self, e):
-            if getattr(e, "is_directory", False):
-                return
-            p = Path(getattr(e, "dest_path", None) or e.src_path)
-            if _is_relevant_file(p, root):
-                debouncer.schedule(str(p))
+            for path in _event_paths(e, root):
+                debouncer.schedule(path)
 
     observer = Observer()
     observer.schedule(Handler(), str(root), recursive=True)
