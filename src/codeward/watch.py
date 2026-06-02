@@ -2,14 +2,14 @@
 
 `codeward watch` keeps an in-memory RepoIndex hot. On file-system events it
 reanalyzes only the changed file and writes the SQLite cache back to disk.
-Every other CLI invocation in the same repo then loads from that fresh cache,
-which is much faster than rebuilding from scratch on a large repo.
+Other CLI invocations can refresh stale cache entries themselves, but a hot
+watcher keeps that work off the command path on large repos.
 
 Design intentionally small:
   - Foreground process (no fork / pidfile / daemonization). Caller wraps in
     nohup/systemd/launchd if they want it backgrounded.
   - No socket RPC. CLI commands still construct their own RepoIndex; the
-    benefit is that the SQLite cache stays fresh under their feet.
+    benefit is that the SQLite cache is already fresh when they start.
   - Falls back to mtime polling every 2s if `watchdog` is not installed.
   - Debounces: a burst of saves triggers exactly one reindex, not N.
 """
@@ -96,10 +96,10 @@ def _reindex_paths(idx: RepoIndex, root: Path, paths: set[str]) -> int:
                 updated += 1
             continue
         try:
-            size = p.stat().st_size
+            st = p.stat()
         except OSError:
             continue
-        if size > MAX_INDEXABLE_BYTES:
+        if st.st_size > MAX_INDEXABLE_BYTES:
             if rel in idx.files:
                 del idx.files[rel]
                 idx._text_cache.pop(rel, None)
@@ -114,6 +114,8 @@ def _reindex_paths(idx: RepoIndex, root: Path, paths: set[str]) -> int:
         except Exception as e:
             print(f"[codeward watch] analyze failed for {rel}: {e}", file=sys.stderr)
             continue
+        info.mtime_ns = st.st_mtime_ns
+        info.size = st.st_size
         idx.files[rel] = info
         idx._text_cache[rel] = text
         updated += 1

@@ -146,8 +146,8 @@ def role_for(path: str) -> str:
 
 def cmd_watch(args) -> int:
     """Run a foreground re-indexer that keeps the SQLite cache fresh.
-    Subsequent `codeward <cmd>` calls in the same repo become much faster
-    because they load from a hot cache instead of rebuilding from scratch.
+    Subsequent `codeward <cmd>` calls can already refresh stale cache entries;
+    watch keeps that refresh work off the command path on large repos.
     Different surface from RTK (RTK has no daemon); no clash."""
     from .watch import run_watch
     return run_watch(Path.cwd(), debounce=getattr(args, "debounce", 0.5))
@@ -242,13 +242,7 @@ def cmd_api(args) -> int:
     idx = RepoIndex(Path.cwd())
     json_mode = getattr(args, "json_output", False)
     target = args.target.replace("\\", "/")
-    matched = []
-    if target in idx.files:
-        matched = [target]
-    else:
-        # treat as directory prefix
-        prefix = target.rstrip("/") + "/"
-        matched = sorted(p for p in idx.files if p == target or p.startswith(prefix))
+    matched = _matching_files(idx, target)
     if not matched:
         msg = f"No files matched: {target}"
         if json_mode:
@@ -319,11 +313,7 @@ def cmd_routes(args) -> int:
 
     if target:
         target = target.replace("\\", "/")
-        if target in idx.files:
-            candidate_files = [target]
-        else:
-            prefix = target.rstrip("/") + "/"
-            candidate_files = sorted(p for p in idx.files if p == target or p.startswith(prefix))
+        candidate_files = _matching_files(idx, target)
         if not candidate_files:
             msg = f"No files matched: {target}"
             if json_mode:
@@ -909,11 +899,6 @@ def cmd_callgraph(args) -> int:
     return 0
 
 
-def calls_from_symbol_body(idx: RepoIndex, sym) -> list[tuple[str, str, bool]]:
-    """Backward-compatible helper returning (class_name, method_name, inferred)."""
-    return [(cls, method, inferred) for cls, method, inferred, _, _, _ in calls_from_symbol_body_metadata(idx, sym)]
-
-
 def calls_from_symbol_body_metadata(idx: RepoIndex, sym) -> list[tuple[str, str, bool, str, str, str]]:
     """Returns list of (class_name, method_name, inferred, analyzer, precision, confidence). `inferred` is True
     when class_name was resolved from an earlier instance assignment rather than
@@ -1019,15 +1004,7 @@ def selected_files(idx: RepoIndex, args) -> list[str]:
     if getattr(args, "changed", False):
         return idx.changed_files(getattr(args, "base", None))
     if getattr(args, "target", None):
-        target = args.target.replace("\\", "/")
-        resolved = _resolve_repo_file(idx, target)
-        if resolved:
-            return [resolved]
-        normalized = os.path.normpath(target).replace("\\", "/")
-        while normalized.startswith("./"):
-            normalized = normalized[2:]
-        prefix = normalized.rstrip("/") + "/"
-        return sorted(p for p in idx.files if p.startswith(prefix))
+        return _matching_files(idx, args.target)
     return idx.changed_files(getattr(args, "base", None))
 
 
@@ -1186,40 +1163,54 @@ def _resolve_repo_file(idx: RepoIndex, raw: str) -> str | None:
     repo-relative path or an unambiguous trailing-path suffix (so
     `routing.py` resolves `fastapi/routing.py` when unique). Returns None
     when there is no match or the suffix is ambiguous."""
-    raw = raw.replace("\\", "/")
-    candidates = [raw]
-    try:
-        p = Path(raw)
-        if p.is_absolute():
-            candidates.append(p.resolve().relative_to(idx.root.resolve()).as_posix())
-    except (OSError, ValueError):
-        pass
-    normalized = os.path.normpath(raw).replace("\\", "/")
-    if normalized != ".":
-        candidates.append(normalized)
-    if normalized.startswith("./"):
-        candidates.append(normalized[2:])
-    if raw.startswith("./"):
-        candidates.append(raw[2:])
-
-    seen: set[str] = set()
-    normalized_candidates = []
+    candidates = _repo_path_candidates(idx, raw)
     for candidate in candidates:
-        candidate = candidate.lstrip("/")
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            normalized_candidates.append(candidate)
-
-    for candidate in normalized_candidates:
         if candidate in idx.files:
             return candidate
     matches = [
         p for p in idx.files
-        if any(p == candidate or p.endswith("/" + candidate) for candidate in normalized_candidates)
+        if any(p.endswith("/" + candidate) for candidate in candidates)
     ]
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _repo_path_candidates(idx: RepoIndex, raw: str) -> list[str]:
+    raw = (raw or "").replace("\\", "/")
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.replace("\\", "/")
+        while value.startswith("./"):
+            value = value[2:]
+        if value and value != "." and value not in candidates:
+            candidates.append(value)
+
+    add(raw)
+    normalized = os.path.normpath(raw).replace("\\", "/")
+    add(normalized)
+    try:
+        p = Path(raw)
+        if p.is_absolute():
+            add(p.resolve().relative_to(idx.root.resolve()).as_posix())
+    except (OSError, ValueError):
+        pass
+    return candidates
+
+
+def _matching_files(idx: RepoIndex, raw: str | None, *, code_only: bool = False) -> list[str]:
+    pool = list(idx.code_files) if code_only else sorted(idx.files)
+    if not raw or raw.replace("\\", "/") in {".", "./"}:
+        return pool
+    resolved = _resolve_repo_file(idx, raw)
+    if resolved and resolved in pool:
+        return [resolved]
+    matches: set[str] = set()
+    for candidate in _repo_path_candidates(idx, raw):
+        prefix = candidate.rstrip("/") + "/"
+        matches.update(p for p in pool if p.startswith(prefix))
+    return sorted(matches)
 
 
 def _detect_test_runner(idx: RepoIndex) -> dict:
@@ -1386,11 +1377,7 @@ def cmd_dead(args) -> int:
 
     if target:
         target = target.replace("\\", "/")
-        if target in idx.files:
-            matched = [target]
-        else:
-            prefix = target.rstrip("/") + "/"
-            matched = sorted(p for p in idx.files if p == target or p.startswith(prefix))
+        matched = _matching_files(idx, target)
         if not matched:
             msg = f"No files matched: {target}"
             if json_mode:
@@ -1763,11 +1750,7 @@ def cmd_budget(args) -> int:
     top_n = max(1, int(getattr(args, "top", 10) or 10))
     candidates = list(idx.code_files)
     if target:
-        if target in idx.files:
-            candidates = [target]
-        else:
-            prefix = target.rstrip("/") + "/"
-            candidates = [p for p in candidates if p == target or p.startswith(prefix)]
+        candidates = _matching_files(idx, target, code_only=True)
     rows = []
     total_raw = 0
     for rel in candidates:
@@ -1823,12 +1806,9 @@ def cmd_budget(args) -> int:
 
 def _pack_target_files(idx: RepoIndex, target: str) -> list[str]:
     target = target.replace("\\", "/").strip("/")
-    if target in idx.files:
-        return [target]
-    prefix = target.rstrip("/") + "/"
-    dir_matches = sorted(p for p in idx.code_files if p.startswith(prefix))
-    if dir_matches:
-        return dir_matches[:12]
+    file_matches = _matching_files(idx, target, code_only=True)
+    if file_matches:
+        return file_matches[:12]
     syms = idx.find_symbol(target)
     if syms:
         return sorted({s.file for s in syms})

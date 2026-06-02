@@ -41,7 +41,7 @@ TEST_PATTERNS = [
 ]
 TEST_DIR_SEGMENTS = {"tests", "test", "__tests__", "spec", "specs"}
 IGNORE_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", "target", ".next", ".cache"}
-CACHE_SCHEMA_VERSION = "2"
+CACHE_SCHEMA_VERSION = "3"
 ANALYZER_VERSION = "2026-05-17"
 
 
@@ -79,6 +79,8 @@ class FileInfo:
     path: str
     lang: str
     lines: int
+    mtime_ns: int = 0
+    size: int = 0
     imports: list[str] = field(default_factory=list)
     symbols: list[Symbol] = field(default_factory=list)
     routes: dict[str, str] = field(default_factory=dict)
@@ -133,12 +135,11 @@ class RepoIndex:
     def _rel(self, p: Path) -> str:
         return p.relative_to(self.root).as_posix()
 
-    def _source_file_state(self) -> tuple[float, set[str]]:
-        """Return (newest_mtime, set_of_relpaths) of all indexable files under root.
-        Used to invalidate the cache on adds, deletes, or modifications.
+    def _source_file_state(self) -> dict[str, tuple[int, int]]:
+        """Return relpath -> (mtime_ns, size) for indexable files under root.
+        Used to refresh the cache on adds, deletes, or modifications.
         Mirrors the size filter in _build() so the cached file set agrees."""
-        newest = 0.0
-        rels: set[str] = set()
+        states: dict[str, tuple[int, int]] = {}
         for p in self._iter_files():
             try:
                 st = p.stat()
@@ -146,13 +147,13 @@ class RepoIndex:
                 continue
             if st.st_size > MAX_INDEXABLE_BYTES:
                 continue
-            if st.st_mtime > newest:
-                newest = st.st_mtime
             try:
-                rels.add(p.relative_to(self.root).as_posix())
+                rel = p.relative_to(self.root).as_posix()
             except ValueError:
                 pass
-        return newest, rels
+            else:
+                states[rel] = (st.st_mtime_ns, st.st_size)
+        return states
 
     def _newest_source_mtime(self) -> float:
         return self._source_file_state()[0]
@@ -161,24 +162,45 @@ class RepoIndex:
         db_path = self.root / ".codeward" / "index.sqlite"
         if not db_path.exists():
             return False
-        try:
-            cache_mtime = db_path.stat().st_mtime
-        except OSError:
-            return False
-        newest, current_files = self._source_file_state()
-        if newest >= cache_mtime:
-            return False
+        current_state = self._source_file_state()
         try:
             self._load_sqlite(db_path)
         except (sqlite3.Error, OSError):
             self.files = {}
             return False
-        # If the cached file set diverges from the on-disk set (file added or deleted
-        # without modifying any other source mtime), force a rebuild.
-        if set(self.files.keys()) != current_files:
-            self.files = {}
-            return False
+        if self._cached_file_state() != current_state:
+            self._refresh_changed_files(current_state)
         return True
+
+    def _cached_file_state(self) -> dict[str, tuple[int, int]]:
+        return {rel: (info.mtime_ns, info.size) for rel, info in self.files.items()}
+
+    def _refresh_changed_files(self, current_state: dict[str, tuple[int, int]]) -> None:
+        cached = self._cached_file_state()
+        current_files = set(current_state)
+        for rel in set(cached) - current_files:
+            self.files.pop(rel, None)
+            self._text_cache.pop(rel, None)
+
+        changed = sorted(rel for rel, state in current_state.items() if cached.get(rel) != state)
+        for rel in changed:
+            p = self.root / rel
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                self.files.pop(rel, None)
+                self._text_cache.pop(rel, None)
+                continue
+            info = analyze_file(rel, text, custom_side_effect_rules=self.config.get("custom_side_effect_rules"))
+            info.mtime_ns, info.size = current_state[rel]
+            self.files[rel] = info
+            self._text_cache[rel] = text
+
+        self._resolve_all_imports()
+        try:
+            self.write_sqlite()
+        except (OSError, sqlite3.Error):
+            pass
 
     def _load_sqlite(self, db_path: Path) -> None:
         con = sqlite3.connect(db_path)
@@ -200,14 +222,14 @@ class RepoIndex:
                 raise sqlite3.Error("cache metadata stale")
             sym_cols = {row[1] for row in con.execute("pragma table_info(symbols)")}
             file_cols = {row[1] for row in con.execute("pragma table_info(files)")}
-            if not {"analyzer", "precision", "confidence"} <= file_cols:
+            if not {"analyzer", "precision", "confidence", "mtime_ns", "size"} <= file_cols:
                 raise sqlite3.Error("cache schema outdated")
             if not {"signature", "end_line", "analyzer", "precision", "confidence"} <= sym_cols:
                 # Pre-signature cache; rebuild to populate the new columns.
                 raise sqlite3.Error("cache schema outdated")
             files = {
-                row[0]: FileInfo(path=row[0], lang=row[1], lines=row[2], analyzer=row[3], precision=row[4], confidence=row[5])
-                for row in con.execute("select path, lang, lines, analyzer, precision, confidence from files")
+                row[0]: FileInfo(path=row[0], lang=row[1], lines=row[2], analyzer=row[3], precision=row[4], confidence=row[5], mtime_ns=row[6], size=row[7])
+                for row in con.execute("select path, lang, lines, analyzer, precision, confidence, mtime_ns, size from files")
             }
             for file_path, name in con.execute("select file, name from imports"):
                 if file_path in files:
@@ -232,10 +254,10 @@ class RepoIndex:
     def _build(self) -> None:
         for p in self._iter_files():
             try:
-                size = p.stat().st_size
+                st = p.stat()
             except OSError:
                 continue
-            if size > MAX_INDEXABLE_BYTES:
+            if st.st_size > MAX_INDEXABLE_BYTES:
                 continue
             try:
                 text = p.read_text(encoding="utf-8", errors="replace")
@@ -243,7 +265,10 @@ class RepoIndex:
                 continue
             rel = self._rel(p)
             self._text_cache[rel] = text
-            self.files[rel] = analyze_file(rel, text, custom_side_effect_rules=self.config.get("custom_side_effect_rules"))
+            info = analyze_file(rel, text, custom_side_effect_rules=self.config.get("custom_side_effect_rules"))
+            info.mtime_ns = st.st_mtime_ns
+            info.size = st.st_size
+            self.files[rel] = info
         self._resolve_all_imports()
 
     def is_test_file(self, path: str) -> bool:
@@ -604,7 +629,7 @@ class RepoIndex:
                 drop table if exists side_effects;
                 drop table if exists resolved_deps;
                 drop table if exists metadata;
-                create table files(path text primary key, lang text not null, lines integer not null, is_test integer not null, analyzer text not null default 'regex', precision text not null default 'heuristic', confidence text not null default 'low');
+                create table files(path text primary key, lang text not null, lines integer not null, is_test integer not null, analyzer text not null default 'regex', precision text not null default 'heuristic', confidence text not null default 'low', mtime_ns integer not null default 0, size integer not null default 0);
                 create table imports(file text not null, name text not null);
                 create table symbols(file text not null, name text not null, kind text not null, line integer not null, methods text not null, signature text not null default '', end_line integer not null default 0, analyzer text not null default 'regex', precision text not null default 'heuristic', confidence text not null default 'low');
                 create table routes(file text not null, route text not null, handler text not null);
@@ -623,8 +648,8 @@ class RepoIndex:
             )
             for info in self.files.values():
                 con.execute(
-                    "insert into files(path, lang, lines, is_test, analyzer, precision, confidence) values (?, ?, ?, ?, ?, ?, ?)",
-                    (info.path, info.lang, info.lines, int(self.is_test_file(info.path)), info.analyzer, info.precision, info.confidence),
+                    "insert into files(path, lang, lines, is_test, analyzer, precision, confidence, mtime_ns, size) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (info.path, info.lang, info.lines, int(self.is_test_file(info.path)), info.analyzer, info.precision, info.confidence, info.mtime_ns, info.size),
                 )
                 con.executemany("insert into imports(file, name) values (?, ?)", [(info.path, x) for x in info.imports])
                 con.executemany(
@@ -965,16 +990,24 @@ def analyze_python(info: FileInfo, text: str) -> None:
     info.analyzer = "python_ast"
     info.precision = "exact_range"
     info.confidence = "high"
-    for node in tree.body:
+    seen_imports: set[tuple[int, str]] = set()
+
+    def add_import(level: int, module: str) -> None:
+        key = (level, module)
+        if key in seen_imports:
+            return
+        seen_imports.add(key)
+        info.imports.append(module)
+        info.raw_imports.append(key)
+
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                info.imports.append(alias.name)
-                info.raw_imports.append((0, alias.name))
+                add_import(0, alias.name)
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             level = node.level or 0
-            info.imports.append(module)
-            info.raw_imports.append((level, module))
+            add_import(level, module)
             # `from . import x, y` and `from pkg import submodule` may target sibling
             # files. Try resolving each name as a submodule too — harmless if it
             # resolves to nothing, useful for namespace packages without __init__.py.
@@ -982,8 +1015,10 @@ def analyze_python(info: FileInfo, text: str) -> None:
                 if alias.name == "*":
                     continue
                 combined = f"{module}.{alias.name}" if module else alias.name
-                info.raw_imports.append((level, combined))
-        elif isinstance(node, ast.ClassDef):
+                add_import(level, combined)
+
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
             methods = [n.name for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
             bases = ", ".join(_unparse(b) for b in node.bases)
             sig = f"class {node.name}({bases})" if bases else f"class {node.name}"
@@ -1392,18 +1427,3 @@ def extract_security_findings(text: str, lang: str = "Python") -> list[str]:
     if re.search(r"(?i)random\.(random|randint|choice|choices)\s*\(", scan) and re.search(r"(?i)token|secret|password|salt|nonce|key|crypto", scan):
         findings.append("non-cryptographic randomness")
     return sorted(set(findings))
-
-
-def path_to_module_names(rel: str) -> set[str]:
-    p = Path(rel)
-    stem = p.with_suffix("").as_posix()
-    parts = stem.split("/")
-    names: set[str] = set()
-    if len(parts) > 1:
-        names.add(stem)
-        names.add(stem.replace("/", "."))
-        names.add(".".join(parts[-2:]))
-        names.add("/".join(parts[-2:]))
-    elif len(parts[0]) >= 4:
-        names.add(parts[0])
-    return names

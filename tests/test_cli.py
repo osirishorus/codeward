@@ -215,6 +215,44 @@ def test_affected_resolves_dot_prefixed_target(sample_repo):
     assert "tests/test_user_service.py" in result.stdout
 
 
+def test_file_target_commands_accept_dot_prefixed_paths(sample_repo):
+    result = run_cli(["api", "./src/services/user_service.py"], sample_repo)
+    assert result.returncode == 0
+    assert "UserService" in result.stdout
+
+    budget = json.loads(run_cli(["budget", "--json", "./src/services/user_service.py"], sample_repo).stdout)
+    assert budget["files_analyzed"] == 1
+    assert budget["files"][0]["path"] == "src/services/user_service.py"
+
+    pack = run_cli(["pack", "./src/services/user_service.py", "--max-tokens", "220"], sample_repo)
+    assert pack.returncode == 0
+    assert "src/services/user_service.py" in pack.stdout
+
+    routes = json.loads(run_cli(["routes", "--json", "./src/routes/user_routes.py"], sample_repo).stdout)
+    assert routes["count"] == 1
+    assert routes["routes"][0]["declared_in"] == "src/routes/user_routes.py"
+
+    dead = run_cli(["dead", "--json", "./src/services/user_service.py"], sample_repo)
+    assert dead.returncode == 0
+
+
+def test_budget_dot_prefixed_target_records_global_history(sample_repo, tmp_path):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {"PYTHONPATH": str(SRC), "HOME": str(fake_home)}
+    result = subprocess.run(
+        [sys.executable, "-m", "codeward.cli", "budget", "./src/services/user_service.py"],
+        cwd=sample_repo, text=True, capture_output=True, env=env,
+    )
+
+    assert result.returncode == 0
+    history = fake_home / ".codeward" / "history.jsonl"
+    rows = [json.loads(line) for line in history.read_text().splitlines()]
+    assert rows[-1]["command"] == "direct: codeward budget"
+    assert rows[-1]["raw_tokens"] > 0
+    assert rows[-1]["repo"] == str(sample_repo)
+
+
 def test_slice_prefers_ranged_symbol_when_exact_match_is_ambiguous(sample_repo):
     (sample_repo / "src" / "zzz_wrapper.js").write_text("function main() {}\n")
     test_file = sample_repo / "tests" / "test_user_service.py"
@@ -234,6 +272,25 @@ def test_routes():
     assert result.returncode == 0
     assert "tests/test_user_service.py" in result.stdout
     assert "tests/test_user_routes.py" not in result.stdout
+
+
+def test_tests_for_detects_function_local_imports(tmp_path):
+    (tmp_path / "src" / "core").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "core" / "engine_runtime.py").write_text(
+        "class Runtime:\n"
+        "    pass\n"
+    )
+    (tmp_path / "tests" / "test_semantics.py").write_text(
+        "def test_runtime():\n"
+        "    from src.core.engine_runtime import Runtime\n"
+        "    assert Runtime()\n"
+    )
+
+    result = run_cli(["tests-for", "src/core/engine_runtime.py"], tmp_path)
+
+    assert result.returncode == 0
+    assert "tests/test_semantics.py" in result.stdout
 
 
 def test_tests_for_short_module_name_matches_exact_test_stem(sample_repo):
@@ -824,6 +881,40 @@ def test_index_uses_sqlite_cache_when_fresh(sample_repo):
     _t.sleep(1.1)
     run_cli(["map"], sample_repo)
     assert db.stat().st_mtime > first_mtime, "cache should rebuild after source change"
+
+
+def test_stale_sqlite_cache_refreshes_only_changed_files(tmp_path, monkeypatch):
+    from codeward import index as index_mod
+
+    src = tmp_path / "src"
+    src.mkdir()
+    changed = src / "changed.py"
+    unchanged = src / "unchanged.py"
+    changed.write_text("def old_changed():\n    return 1\n")
+    unchanged.write_text("def old_unchanged():\n    return 2\n")
+
+    first = index_mod.RepoIndex(tmp_path)
+    assert first.find_symbol("old_changed")
+    cache = tmp_path / ".codeward" / "index.sqlite"
+    cache_mtime = cache.stat().st_mtime
+
+    analyzed: list[str] = []
+    real_analyze = index_mod.analyze_file
+
+    def tracking_analyze(path, text, *, custom_side_effect_rules=None):
+        analyzed.append(path)
+        return real_analyze(path, text, custom_side_effect_rules=custom_side_effect_rules)
+
+    monkeypatch.setattr(index_mod, "analyze_file", tracking_analyze)
+    changed.write_text("def new_changed():\n    return 3\n")
+    os.utime(changed, (cache_mtime + 2, cache_mtime + 2))
+
+    second = index_mod.RepoIndex(tmp_path)
+
+    assert analyzed == ["src/changed.py"]
+    assert second.find_symbol("new_changed")
+    assert not second.find_symbol("old_changed")
+    assert second.find_symbol("old_unchanged")
 
 
 def test_callgraph_resolves_lowercase_instance_assignments(sample_repo):
