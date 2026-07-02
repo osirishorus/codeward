@@ -6,8 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-02
+
 ### Added
 
+- **`codeward todos [target]`** — lists TODO/FIXME/HACK/XXX/BUG comment markers grouped by file, with JSON output and MCP parity via `codeward_todos`.
+- `codeward search` now supports `--regex` and `-i` / `--ignore-case`; JSON output includes append-only `regex` and `ignore_case` booleans.
+- Route detection now recognizes Next.js App Router file routes (`app/**/route.ts|js`), `pages/api/*`, Phoenix router declarations, and Ktor route blocks.
 - **`codeward affected [--changed | <target>] [--depth N]`** — CI test-selection. Walks the reverse-dependency graph transitively from the change set to every impacted file, maps those to covering tests, and emits the minimal test set plus a ready-to-run command (`pytest`/`jest`/`vitest`/`go` auto-detected). `--tests-only` prints just the command for `$(codeward affected --tests-only)` in CI. Unlike `impact` (single hop), this is the full transitive blast radius.
 - **`codeward why <fileA> <fileB> [--direction forward|reverse|any]`** — shortest import/dependency path between two files (BFS over the resolved-dependency graph). Explains transitive coupling; reports `connected: false` with `path: null` when there is no path either way.
 - **`codeward dead [target] [--min-confidence] [--include-public]`** — top-level functions/classes with zero references anywhere (same-file internal usages count, so private helpers stay off the list). Excludes route handlers, console entrypoints, dunders, and test files; public (exported) symbols are excluded by default since external consumers may import them (`--include-public` to include). Confidence-gated (`high` = Python AST, `medium` = tree-sitter, `low` = regex). Heuristic — dynamic dispatch / reflection is undetectable.
@@ -16,7 +21,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
-- Extracted `_is_public_symbol` (shared by `api` + `dead`) and `_blame_authors` (shared by `blame` + `owners`); added `RepoIndex.transitively_affected` and `RepoIndex.dependency_path` graph primitives. No behavior change to existing commands.
+- Import/dependency extraction now covers Java, Kotlin, Scala, C#, Swift, PHP, Ruby, quoted C/C++ includes, and Elixir aliases/imports/use statements; analyzer caches invalidate via a bumped analyzer version.
+- Reference results are genuinely confidence-ranked before truncation, and qualified Python references demote same-name receiver collisions instead of treating every bare method name as equivalent.
+- `api` now honors literal Python `__all__` as the authoritative public surface when present.
+- Not-found exits are standardized on code 2 for symbol lookup and other indexed-target misses.
+- SQLite cache writes use an atomic replacement flow with busy timeouts so concurrent readers do not observe half-written cache files.
+- The npm wrapper installs the matching PyPI version (`codeward==<npm package version>`) instead of an unpinned latest package.
+- Extracted `_is_public_symbol` (shared by `api` + `dead`) and `_blame_authors` (shared by `blame` + `owners`); added `RepoIndex.transitively_affected` and `RepoIndex.dependency_path` graph primitives.
+
+### Fixed
+
+- `dead` no longer keeps an unrelated same-name symbol alive just because another file references a private helper with the same short name.
+- Regex fallback references ignore comments and string literals, reducing false positives in `refs`, `symbol`, `callgraph`, and `dead`.
+- Tree-sitter live-reference walks are guarded against pathological recursion instead of crashing the command.
+- Removed stale `doctor` PATH-shim reporting; shims were removed in 0.5.2.
+- Clarification: `watchdog` is a core dependency now. Older changelog text that says `codeward watch` uses watchdog from the `[full]` extra describes the historical 0.4-era packaging state.
 
 ## [0.5.2] - 2026-05-16
 

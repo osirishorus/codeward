@@ -1,6 +1,6 @@
 {
   "name": "codeward",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Symbol-level codebase intelligence for coding agents (Python under the hood; this is the npm/npx wrapper).",
   "keywords": [
     "claude",

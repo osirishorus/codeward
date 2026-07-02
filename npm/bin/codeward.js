@@ -7,8 +7,9 @@
  *
  * On first run:
  *   1. Detect an existing `codeward` on PATH; if found, just exec it.
- *   2. Otherwise, install it once with `pipx install codeward` (preferred —
- *      isolated, on PATH) or `pip install --user codeward` (fallback).
+ *   2. Otherwise, install it once with `pipx install codeward==<wrapper version>`
+ *      (preferred — isolated, on PATH) or `pip install --user codeward==<wrapper version>`
+ *      (fallback).
  *   3. Then exec the freshly-installed binary.
  *
  * All install output is forwarded to stderr so it never pollutes piped JSON.
@@ -21,6 +22,15 @@ const fs = require("node:fs");
 
 const PKG = "codeward";
 const MIN_PY = [3, 11];
+
+function packageVersion() {
+  const pkgPath = path.resolve(__dirname, "../package.json");
+  return JSON.parse(fs.readFileSync(pkgPath, "utf8")).version;
+}
+
+function pythonPackageSpec() {
+  return `${PKG}==${packageVersion()}`;
+}
 
 function which(cmd) {
   const r = spawnSync(process.platform === "win32" ? "where" : "which", [cmd], {
@@ -100,16 +110,17 @@ function findPython() {
 function installCodeward(py) {
   const pipx = which("pipx");
   const log = (msg) => process.stderr.write(`[codeward] ${msg}\n`);
+  const spec = pythonPackageSpec();
 
   if (pipx) {
-    log(`Installing ${PKG} via pipx (one-time, isolated)…`);
-    const r = spawnSync(pipx, ["install", PKG], { stdio: "inherit" });
+    log(`Installing ${spec} via pipx (one-time, isolated)…`);
+    const r = spawnSync(pipx, ["install", spec], { stdio: "inherit" });
     if (r.status === 0) return true;
     log("pipx install failed; falling back to pip --user.");
   }
 
-  log(`Installing ${PKG} via pip --user (one-time)…`);
-  const r = spawnSync(py, ["-m", "pip", "install", "--user", PKG], {
+  log(`Installing ${spec} via pip --user (one-time)…`);
+  const r = spawnSync(py, ["-m", "pip", "install", "--user", spec], {
     stdio: "inherit",
   });
   return r.status === 0;
@@ -147,7 +158,7 @@ function main() {
 
   if (!installCodeward(py)) {
     process.stderr.write(
-      "Codeward install failed. Try manually:  pipx install codeward\n",
+      `Codeward install failed. Try manually:  pipx install ${pythonPackageSpec()}\n`,
     );
     process.exit(1);
   }

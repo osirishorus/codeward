@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -18,15 +19,17 @@ from .index import RepoIndex, extract_security_findings, extract_side_effects, i
 
 
 def codeward_version() -> str:
-    try:
-        return package_version("codeward")
-    except PackageNotFoundError:
-        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    if pyproject.exists():
         try:
             data = tomllib.loads(pyproject.read_text())
             return str(data["project"]["version"])
         except (OSError, KeyError, tomllib.TOMLDecodeError):
-            return "unknown"
+            pass
+    try:
+        return package_version("codeward")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def fmt_list(title: str, items: list[str], empty: str = "none") -> list[str]:
@@ -224,7 +227,7 @@ def cmd_preflight(args) -> int:
     return 0
 
 
-def _is_public_symbol(sym) -> bool:
+def _is_public_symbol(sym, public_names: set[str] | None = None) -> bool:
     """True when `sym` is part of a module's public API surface: a top-level
     (non-method) symbol whose short name does not start with an underscore.
     Shared by `cmd_api` (what does this export?) and `cmd_dead` (which
@@ -232,7 +235,35 @@ def _is_public_symbol(sym) -> bool:
     if sym.kind == "method":
         return False  # methods are covered under their class
     short = sym.name.split(".")[-1]
+    if public_names is not None:
+        return short in public_names
     return not short.startswith("_")
+
+
+def _python_all_exports(text: str) -> set[str] | None:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        target_names: list[str] = []
+        value = None
+        if isinstance(node, ast.Assign):
+            target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target_names = [node.target.id]
+            value = node.value
+        if "__all__" not in target_names or value is None:
+            continue
+        try:
+            literal = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return None
+        if isinstance(literal, (list, tuple)) and all(isinstance(x, str) for x in literal):
+            return set(literal)
+        return None
+    return None
 
 
 def cmd_api(args) -> int:
@@ -255,9 +286,10 @@ def cmd_api(args) -> int:
         if idx.is_test_file(f):
             continue
         info = idx.files[f]
+        public_names = _python_all_exports(idx.text(f)) if info.lang == "Python" else None
         public = []
         for s in info.symbols:
-            if not _is_public_symbol(s):
+            if not _is_public_symbol(s, public_names):
                 continue
             entry = {
                 "name": s.name, "kind": s.kind, "line": s.line, "end_line": s.end_line,
@@ -755,7 +787,7 @@ def _flow_slices(idx, rel: str, info, count: int) -> list[str]:
 
 def cmd_search(args) -> int:
     idx = RepoIndex(Path.cwd())
-    hits = idx.search(args.query)
+    hits = idx.search(args.query, regex=getattr(args, "regex", False), ignore_case=getattr(args, "ignore_case", False))
     by_file: dict[str, list[tuple[int, str]]] = {}
     for rel, line, text in hits:
         by_file.setdefault(rel, []).append((line, text))
@@ -768,7 +800,12 @@ def cmd_search(args) -> int:
             "shown": len(shown),
             "total": len(by_file[rel]),
         })
-    payload = {"command": "search", "query": args.query, "total_matches": len(hits), "files": files_payload}
+    payload = {
+        "command": "search", "query": args.query,
+        "regex": bool(getattr(args, "regex", False)),
+        "ignore_case": bool(getattr(args, "ignore_case", False)),
+        "total_matches": len(hits), "files": files_payload,
+    }
     out = [f"{len(hits)} matches for {args.query!r} in {len(by_file)} files"]
     for f in files_payload:
         out.append(f"\n{f['file']}:")
@@ -778,6 +815,70 @@ def cmd_search(args) -> int:
             out.append(f"  ... {f['total'] - f['shown']} more")
     raw_estimate = sum(len(t) + len(rel) + 8 for rel, _, t in hits) // 4
     emit_tracked(out, "search " + shlex.quote(args.query), raw_token_estimate=raw_estimate, payload=payload, json_mode=getattr(args, "json_output", False))
+    return 0
+
+
+_TODO_MARKER_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX|BUG)\b\s*:?\s*(.*)", re.I)
+
+
+def _comment_fragment(line: str) -> str | None:
+    positions = []
+    for token in ("#", "//", "/*", "*"):
+        pos = line.find(token)
+        if pos >= 0:
+            positions.append((pos, token))
+    if not positions:
+        return None
+    pos, token = min(positions)
+    if token == "#" and line.lstrip().startswith("#include"):
+        return None
+    return line[pos + len(token):].strip().rstrip("*/").strip()
+
+
+def cmd_todos(args) -> int:
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    target = getattr(args, "target", None)
+    if target:
+        target = target.replace("\\", "/")
+        matched = _matching_files(idx, target)
+        if not matched:
+            msg = f"No files matched: {target}"
+            if json_mode:
+                print(json.dumps({"command": "todos", "target": target, "error": msg}, indent=2))
+            else:
+                print(msg, file=sys.stderr)
+            return 2
+    else:
+        matched = sorted(idx.files)
+    rows: dict[str, list[dict]] = {}
+    for rel in matched:
+        if idx.is_test_file(rel):
+            continue
+        for line_no, line in enumerate(idx.text(rel).splitlines(), 1):
+            fragment = _comment_fragment(line)
+            if fragment is None:
+                continue
+            marker = _TODO_MARKER_RE.search(fragment)
+            if not marker:
+                continue
+            rows.setdefault(rel, []).append({
+                "line": line_no,
+                "marker": marker.group(1).upper(),
+                "text": marker.group(2).strip(),
+                "raw": line.strip(),
+            })
+    total = sum(len(v) for v in rows.values())
+    payload = {"command": "todos", "target": target, "total": total, "todos": rows}
+    out = [f"# Codeward todos ({total})"]
+    if not rows:
+        out.append("No TODO/FIXME/HACK/XXX/BUG markers found.")
+    for rel in sorted(rows):
+        out.append(f"\n{rel}:")
+        for item in rows[rel]:
+            text = f": {item['text']}" if item["text"] else ""
+            out.append(f"  {item['line']}: {item['marker']}{text}")
+    emit_tracked(out, "todos", payload=payload, json_mode=json_mode)
     return 0
 
 
@@ -798,7 +899,7 @@ def cmd_symbol(args) -> int:
             print(f"Symbol not found; text matches: {len(hits)}")
             for rel, line, text in hits[:20]:
                 print(f"- {rel}:{line}: {text}")
-        return 1 if not hits else 0
+        return 2
     defs = []
     for s in syms:
         scope = set(idx.dependents_of_file(s.file)) | {s.file}
@@ -1424,7 +1525,8 @@ def cmd_dead(args) -> int:
             # tree_sitter, so any surviving hit is a genuine usage — including
             # same-file internal callers, which correctly keeps private helpers
             # off the dead list. A symbol with no hits anywhere is the candidate.
-            if idx.references_to(sym.name):
+            ref_scope = set(idx.dependents_of_file(rel)) | {rel}
+            if idx.references_to(sym.name, scope=ref_scope):
                 continue
             # Unreferenced outside its own file — classify why it might survive.
             if short in entrypoints:
@@ -2323,16 +2425,6 @@ def cmd_doctor(args) -> int:
         )
         lines.append(f"{label} ({settings_path}): {'installed' if has_codeward else 'present but no Codeward entry'}")
 
-    shim_dir = Path.cwd() / ".codeward" / "bin"
-    on_path = any(Path(p).resolve() == shim_dir.resolve() for p in os.environ.get("PATH", "").split(os.pathsep) if p)
-    if shim_dir.exists():
-        lines.append(f"PATH shims: {shim_dir} ({'on PATH' if on_path else 'NOT on PATH'})")
-        if rtk and on_path:
-            issues.append("PATH shims are active alongside RTK; rtk-invoked tools will route through Codeward shims")
-            lines.append("WARNING: shims may double-transform commands invoked via rtk")
-    else:
-        lines.append("PATH shims: not installed")
-
     db = Path.cwd() / ".codeward" / "index.sqlite"
     if db.exists():
         try:
@@ -2407,6 +2499,7 @@ def semantic_agents_block(rtk_present: bool) -> str:
         "- `codeward map` — repo overview (primary language, important files, suggested next steps).\n"
         "- `codeward read <file>` — symbols, imports, dependents, likely tests, side effects.\n"
         "- `codeward search <query>` — grouped search hits across the repo.\n"
+        "- `codeward todos [target]` — TODO/FIXME/HACK/XXX/BUG comment markers grouped by file.\n"
         "- `codeward symbol <Name>` — definition + confidence-ranked callers + tests for a symbol.\n"
         "- `codeward callgraph <route-or-symbol>` — confidence-ranked flow summary, with side effects.\n"
         "- `codeward tests-for <file-or-symbol>` — likely covering tests.\n"
@@ -2770,7 +2863,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--flow", action="store_true", help="Also dump compact bodies of the file's largest methods")
     r.add_argument("--flow-count", type=int, default=6, help="Number of methods to include with --flow (default: 6)")
     r.set_defaults(func=cmd_read)
-    s = sub.add_parser("search", parents=[common]); s.add_argument("query"); s.add_argument("--per-file", type=int, default=5); s.set_defaults(func=cmd_search)
+    s = sub.add_parser("search", parents=[common]); s.add_argument("query"); s.add_argument("--per-file", type=int, default=5)
+    s.add_argument("--regex", action="store_true", help="Treat query as a regular expression")
+    s.add_argument("-i", "--ignore-case", action="store_true", help="Case-insensitive search")
+    s.set_defaults(func=cmd_search)
+    td = sub.add_parser("todos", parents=[common], help="List TODO/FIXME/HACK/XXX/BUG comment markers")
+    td.add_argument("target", nargs="?", help="Optional file or directory to limit the scan to")
+    td.set_defaults(func=cmd_todos)
     sy = sub.add_parser("symbol", parents=[common]); sy.add_argument("name"); sy.set_defaults(func=cmd_symbol)
     cg = sub.add_parser("callgraph", parents=[common]); cg.add_argument("query"); cg.set_defaults(func=cmd_callgraph)
     tf = sub.add_parser("tests-for", parents=[common]); tf.add_argument("target"); tf.set_defaults(func=cmd_tests_for)

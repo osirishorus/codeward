@@ -48,7 +48,7 @@ def test_version_flag_reports_project_version(sample_repo):
     result = run_cli(["--version"], sample_repo)
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "codeward 0.5.2"
+    assert result.stdout.strip() == "codeward 0.6.0"
 
 
 @pytest.fixture
@@ -140,6 +140,34 @@ def test_search_groups_matches(sample_repo):
     assert "3 matches" in result.stdout
     assert "src/services/user_service.py" in result.stdout
     assert "src/controllers/user_controller.py" in result.stdout
+
+
+def test_search_supports_regex_and_ignore_case(sample_repo):
+    regex_result = run_cli(["search", "--regex", r"create_user\("], sample_repo)
+    assert regex_result.returncode == 0
+    assert "create_user" in regex_result.stdout
+
+    insensitive_result = run_cli(["search", "-i", "userservice"], sample_repo)
+    assert insensitive_result.returncode == 0
+    assert "UserService" in insensitive_result.stdout
+
+
+def test_todos_scans_comments_only(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "todo.py").write_text(
+        'text = "TODO: not a comment"\n'
+        "# TODO: wire the adapter\n"
+        "def f():\n"
+        "    pass  # FIXME inline marker\n"
+    )
+
+    d = json.loads(run_cli(["todos", "--json"], tmp_path).stdout)
+
+    assert d["command"] == "todos"
+    markers = [(item["marker"], item["line"], item["text"]) for item in d["todos"]["src/todo.py"]]
+    assert ("TODO", 2, "wire the adapter") in markers
+    assert ("FIXME", 4, "inline marker") in markers
+    assert all("not a comment" not in item[2] for item in markers)
 
 
 def test_callgraph_for_route(sample_repo):
@@ -814,6 +842,13 @@ def test_doctor_reports_rtk_and_hook_position(sample_repo, tmp_path):
     assert result.returncode == 1
 
 
+def test_doctor_no_longer_reports_removed_path_shims(sample_repo):
+    result = run_cli(["doctor"], sample_repo)
+
+    assert result.returncode in {0, 1}
+    assert "PATH shims" not in result.stdout
+
+
 def test_security_findings_skip_comments_and_docstrings(sample_repo):
     target = sample_repo / "src" / "documented.py"
     target.write_text('''"""
@@ -1353,6 +1388,12 @@ def test_slice_unknown_symbol_returns_error(sample_repo):
     assert "Symbol not found" in result.stderr
 
 
+def test_symbol_unknown_without_text_matches_returns_not_found(sample_repo):
+    result = run_cli(["symbol", "DefinitelyMissingSymbol"], sample_repo)
+    assert result.returncode == 2
+    assert "Symbol not found" in result.stdout
+
+
 def test_refs_lists_callsites_excluding_definition(sample_repo):
     result = run_cli(["refs", "UserService"], sample_repo)
     assert result.returncode == 0
@@ -1517,6 +1558,24 @@ def test_api_emits_only_public_top_level_symbols(sample_repo):
     assert j["files"]
     for s in j["files"][0]["symbols"]:
         assert not s["name"].split(".")[-1].startswith("_")
+
+
+def test_api_honors_python_all_as_authoritative(tmp_path):
+    (tmp_path / "pkg.py").write_text(
+        "__all__ = ['exported']\n"
+        "\n"
+        "def exported():\n"
+        "    return 1\n"
+        "\n"
+        "def visible_but_not_exported():\n"
+        "    return 2\n"
+    )
+
+    result = run_cli(["api", "pkg.py"], tmp_path)
+
+    assert result.returncode == 0
+    assert "exported" in result.stdout
+    assert "visible_but_not_exported" not in result.stdout
 
 
 def test_init_writes_both_claude_md_and_agents_md(tmp_path):
@@ -1850,6 +1909,31 @@ public IActionResult Status() {
     assert extract_routes(aspnet)["ANY /status"] == "Status"
 
 
+def test_extract_routes_phoenix_and_ktor():
+    from codeward.index import extract_routes
+
+    phoenix = 'scope "/", MyAppWeb do\n  get "/users", UserController, :index\nend\n'
+    ktor = 'routing {\n  get("/health") { call.respondText("ok") }\n}\n'
+
+    assert extract_routes(phoenix)["GET /users"] == "UserController.index"
+    assert extract_routes(ktor)["GET /health"] == "block"
+
+
+def test_routes_detects_nextjs_app_router_file_routes(tmp_path):
+    route = tmp_path / "app" / "api" / "users" / "route.ts"
+    route.parent.mkdir(parents=True)
+    route.write_text(
+        "export async function GET() { return Response.json([]) }\n"
+        "export async function POST() { return Response.json({}) }\n"
+    )
+
+    payload = json.loads(run_cli(["routes", "--json"], tmp_path).stdout)
+    routes = {(r["method"], r["path"]): r["handler"] for r in payload["routes"]}
+
+    assert routes[("GET", "/api/users")] == "GET"
+    assert routes[("POST", "/api/users")] == "POST"
+
+
 def test_extract_side_effects_detects_pathlib_write_helpers():
     from codeward.index import extract_side_effects
 
@@ -2156,6 +2240,27 @@ def test_dead_keeps_internally_used_helpers_off_the_list(sample_repo):
     d = json.loads(run_cli(["dead", "--json", "--include-public", "src/services/user_service.py"], sample_repo).stdout)
     names = {s["name"] for s in d["dead_symbols"]}
     assert "_used_internally" not in names
+
+
+def test_dead_does_not_keep_unrelated_same_name_symbol_alive(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "used.py").write_text(
+        "def _dupe():\n"
+        "    return 1\n"
+        "\n"
+        "def caller():\n"
+        "    return _dupe()\n"
+    )
+    (tmp_path / "src" / "unused.py").write_text(
+        "def _dupe():\n"
+        "    return 2\n"
+    )
+
+    d = json.loads(run_cli(["dead", "--json", "--include-public", "src"], tmp_path).stdout)
+    rows = {(s["file"], s["name"]) for s in d["dead_symbols"]}
+
+    assert ("src/used.py", "_dupe") not in rows
+    assert ("src/unused.py", "_dupe") in rows
 
 
 def test_dead_excludes_public_by_default_but_includes_with_flag(sample_repo):

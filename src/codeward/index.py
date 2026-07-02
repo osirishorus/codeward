@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 import tokenize
 import tomllib
 from collections import deque
@@ -42,7 +43,7 @@ TEST_PATTERNS = [
 TEST_DIR_SEGMENTS = {"tests", "test", "__tests__", "spec", "specs"}
 IGNORE_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", "target", ".next", ".cache"}
 CACHE_SCHEMA_VERSION = "3"
-ANALYZER_VERSION = "2026-05-17"
+ANALYZER_VERSION = "2026-07-02-v060"
 
 
 @dataclass
@@ -103,6 +104,8 @@ class RepoIndex:
         self.files: dict[str, FileInfo] = {}
         self._text_cache: dict[str, str] = {}
         self._inverse_deps: dict[str, set[str]] = {}
+        self._python_ast_cache: dict[str, tuple[tuple[int, int], ast.AST | None]] = {}
+        self._treesitter_cache: dict[str, tuple[tuple[int, int], tuple[object, bytes] | None]] = {}
         self._loaded_from_cache = False
         # Per-repo overrides loaded from .codeward/config.toml. Falls back to
         # module-level defaults when no config file is present.
@@ -155,9 +158,6 @@ class RepoIndex:
                 states[rel] = (st.st_mtime_ns, st.st_size)
         return states
 
-    def _newest_source_mtime(self) -> float:
-        return self._source_file_state()[0]
-
     def _try_load_cache(self) -> bool:
         db_path = self.root / ".codeward" / "index.sqlite"
         if not db_path.exists():
@@ -203,8 +203,9 @@ class RepoIndex:
             pass
 
     def _load_sqlite(self, db_path: Path) -> None:
-        con = sqlite3.connect(db_path)
+        con = sqlite3.connect(db_path, timeout=5)
         try:
+            con.execute("pragma busy_timeout=5000")
             tables = {row[0] for row in con.execute("select name from sqlite_master where type='table'")}
             if "resolved_deps" not in tables or "metadata" not in tables:
                 # Old cache format — force a rebuild.
@@ -310,6 +311,10 @@ class RepoIndex:
             ])
         if not target:
             return None
+        if _looks_like_relative_file_import(target):
+            direct = self._resolve_relative_file_import(from_rel, target)
+            if direct:
+                return direct
         if target.startswith("./") or target.startswith("../"):
             # Resolve lexically against self.root rather than process cwd, so the
             # index is correct regardless of where RepoIndex was constructed from.
@@ -337,7 +342,10 @@ class RepoIndex:
                 candidates.extend([
                     stem,
                     f"{stem}.py", f"{stem}.js", f"{stem}.jsx", f"{stem}.ts", f"{stem}.tsx",
-                    f"{stem}.mjs", f"{stem}.cjs",
+                    f"{stem}.mjs", f"{stem}.cjs", f"{stem}.rb", f"{stem}.php", f"{stem}.java",
+                    f"{stem}.kt", f"{stem}.kts", f"{stem}.scala", f"{stem}.sc", f"{stem}.cs",
+                    f"{stem}.swift", f"{stem}.ex", f"{stem}.exs", f"{stem}.c", f"{stem}.h",
+                    f"{stem}.cpp", f"{stem}.hpp",
                     f"{stem}/index.js", f"{stem}/index.ts", f"{stem}/index.jsx", f"{stem}/index.tsx",
                     f"{stem}/__init__.py",
                 ])
@@ -345,21 +353,9 @@ class RepoIndex:
         # Absolute module path: try suffix-match against indexed files.
         # Prefer packages (__init__.py / index.{js,ts}) over single-file modules so that
         # `import flask` resolves to `src/flask/__init__.py` rather than a random `flask.py`.
-        target_path = target.replace(".", "/")
-        candidate_suffixes = [
-            f"{target_path}/__init__.py",
-            f"{target_path}/index.js",
-            f"{target_path}/index.ts",
-            f"{target_path}/index.jsx",
-            f"{target_path}/index.tsx",
-            f"{target_path}.py",
-            f"{target_path}.js",
-            f"{target_path}.ts",
-            f"{target_path}.jsx",
-            f"{target_path}.tsx",
-            f"{target_path}.mjs",
-            f"{target_path}.cjs",
-        ]
+        candidate_suffixes = []
+        for target_path in _module_path_variants(target):
+            candidate_suffixes.extend(_module_candidate_suffixes(target_path))
         for suf in candidate_suffixes:
             if suf in self.files:
                 return suf
@@ -373,6 +369,49 @@ class RepoIndex:
                     return (not_in_test, in_src, len(p))
                 return min(matches, key=score)
         return None
+
+    def _resolve_relative_file_import(self, from_rel: str, target: str) -> str | None:
+        anchor = Path(from_rel).parent
+        target_path = target.replace("\\", "/")
+        if target_path.startswith("./") or target_path.startswith("../"):
+            target_path = os.path.normpath((anchor / target_path).as_posix()).replace("\\", "/")
+            stems = [target_path]
+        else:
+            stems = [(anchor / target_path).as_posix()]
+        candidates: list[str] = []
+        for stem in stems:
+            candidates.append(stem)
+            if not Path(stem).suffix:
+                candidates.extend(f"{stem}{ext}" for ext in _RESOLVABLE_EXTS)
+                candidates.extend([f"{stem}/index.js", f"{stem}/index.ts", f"{stem}/__init__.py"])
+        return _first_existing(self.files, candidates)
+
+    def _python_tree(self, rel: str, text: str) -> ast.AST | None:
+        info = self.files.get(rel)
+        state = (info.mtime_ns, info.size) if info else (0, len(text))
+        cached = self._python_ast_cache.get(rel)
+        if cached and cached[0] == state:
+            return cached[1]
+        try:
+            tree: ast.AST | None = ast.parse(text)
+        except SyntaxError:
+            tree = None
+        self._python_ast_cache[rel] = (state, tree)
+        return tree
+
+    def _treesitter_tree(self, rel: str, text: str) -> tuple[object, bytes] | None:
+        info = self.files.get(rel)
+        state = (info.mtime_ns, info.size) if info else (0, len(text))
+        cached = self._treesitter_cache.get(rel)
+        if cached and cached[0] == state:
+            return cached[1]
+        try:
+            from .analyzers.treesitter import parse_for_path
+            parsed = parse_for_path(rel, text)
+        except (Exception, RecursionError):
+            parsed = None
+        self._treesitter_cache[rel] = (state, parsed)
+        return parsed
 
     def text(self, rel: str) -> str:
         rel = rel.replace("\\", "/")
@@ -464,14 +503,15 @@ class RepoIndex:
             text = self.text(rel)
             info = self.files[rel]
             if info.analyzer == "python_ast":
-                hits.extend(_python_references(rel, text, name))
+                hits.extend(_python_references(rel, text, name, tree=self._python_tree(rel, text)))
                 continue
             if info.analyzer == "tree_sitter":
-                ts_hits = _treesitter_references(rel, text, target)
+                ts_hits = _treesitter_references(rel, text, target, parsed=self._treesitter_tree(rel, text))
                 if ts_hits:
                     hits.extend(ts_hits)
                     continue
-            for i, line in enumerate(text.splitlines(), 1):
+            scan_text = _strip_strings_for_refs(strip_comments_and_docstrings(text, info.lang))
+            for i, line in enumerate(scan_text.splitlines(), 1):
                 stripped = line.strip()
                 for m in pattern.finditer(line):
                     # Skip the definition-line occurrence; keep call sites that
@@ -481,7 +521,7 @@ class RepoIndex:
                     if def_match and def_match.start() <= col < def_match.end():
                         continue
                     hits.append(Reference(rel, i, stripped, column=col))
-        return sorted(_dedupe_refs(hits), key=lambda r: (r.file, r.line, r.column, r.text))
+        return sorted(_dedupe_refs(hits), key=_reference_sort_key)
 
     def dependents_of_file(self, rel: str) -> list[str]:
         deps: set[str] = set(self._inverse_deps.get(rel, set()))
@@ -590,14 +630,23 @@ class RepoIndex:
                 out.add(tf)
         return sorted(out)
 
-    def search(self, query: str, include_tests: bool = False) -> list[tuple[str, int, str]]:
+    def search(self, query: str, include_tests: bool = False, *, regex: bool = False, ignore_case: bool = False) -> list[tuple[str, int, str]]:
         hits = []
+        pattern = None
+        needle = query.lower() if ignore_case else query
+        if regex:
+            flags = re.IGNORECASE if ignore_case else 0
+            try:
+                pattern = re.compile(query, flags)
+            except re.error:
+                pattern = re.compile(re.escape(query), flags)
         for rel in self.files:
             if not include_tests and is_test_file(rel):
                 continue
             text = self.text(rel)
             for i, line in enumerate(text.splitlines(), 1):
-                if query in line:
+                haystack = line.lower() if ignore_case else line
+                if (pattern.search(line) if pattern else needle in haystack):
                     hits.append((rel, i, line.strip()))
         return hits
 
@@ -618,8 +667,13 @@ class RepoIndex:
         """Persist the current lightweight semantic index for large-repo reuse/tools."""
         db_path = db_path or (self.root / ".codeward" / "index.sqlite")
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(db_path)
+        fd, tmp_name = tempfile.mkstemp(prefix=db_path.name + ".", suffix=".tmp", dir=db_path.parent)
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        con = sqlite3.connect(tmp_path, timeout=5)
         try:
+            con.execute("pragma busy_timeout=5000")
+            con.execute("pragma journal_mode=wal")
             con.executescript(
                 """
                 drop table if exists files;
@@ -662,6 +716,20 @@ class RepoIndex:
             con.commit()
         finally:
             con.close()
+        try:
+            os.replace(tmp_path, db_path)
+            con = sqlite3.connect(db_path, timeout=5)
+            try:
+                con.execute("pragma busy_timeout=5000")
+                con.execute("pragma journal_mode=wal")
+            finally:
+                con.close()
+        finally:
+            for extra in (tmp_path, Path(str(tmp_path) + "-wal"), Path(str(tmp_path) + "-shm")):
+                try:
+                    extra.unlink()
+                except OSError:
+                    pass
         return db_path
 
 
@@ -679,25 +747,36 @@ def _dedupe_refs(refs: list[Reference]) -> list[Reference]:
     return out
 
 
-def _python_references(rel: str, text: str, name: str) -> list[Reference]:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
+def _reference_sort_key(ref: Reference) -> tuple[int, str, int, int, str]:
+    rank = {"high": 0, "medium": 1, "low": 2}
+    return (rank.get(ref.confidence, 2), ref.file, ref.line, ref.column, ref.text)
+
+
+def _python_references(rel: str, text: str, name: str, *, tree: ast.AST | None = None) -> list[Reference]:
+    if tree is None:
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return []
+    if tree is None:
         return []
     lines = text.splitlines()
     bare = name.rsplit(".", 1)[-1]
+    qualifier = name.rsplit(".", 1)[0] if "." in name else ""
     aliases = {bare}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                if alias.name == bare or alias.name.rsplit(".", 1)[-1] == bare:
-                    aliases.add(alias.asname or alias.name.rsplit(".", 1)[-1])
+    if not qualifier:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.name == bare or alias.name.rsplit(".", 1)[-1] == bare:
+                        aliases.add(alias.asname or alias.name.rsplit(".", 1)[-1])
 
     refs: list[Reference] = []
 
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
             self.shadow_stack: list[set[str]] = []
+            self.class_stack: list[str] = []
 
         def _line(self, node: ast.AST) -> str:
             lineno = getattr(node, "lineno", 0) or 0
@@ -751,16 +830,38 @@ def _python_references(rel: str, text: str, name: str) -> list[Reference]:
                 self.visit(base)
             for keyword in node.keywords:
                 self.visit(keyword)
+            self.class_stack.append(node.name)
             for stmt in node.body:
                 self.visit(stmt)
+            self.class_stack.pop()
 
         def visit_Name(self, node: ast.Name) -> None:
-            if isinstance(node.ctx, ast.Load) and node.id in aliases and not self._shadowed(node.id):
-                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", "high", "name", getattr(node, "col_offset", -1)))
+            if not isinstance(node.ctx, ast.Load) or node.id not in aliases or self._shadowed(node.id):
+                return
+            confidence = "high"
+            if qualifier:
+                confidence = "high" if self.class_stack and self.class_stack[-1] == qualifier else "low"
+            refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", confidence, "name", getattr(node, "col_offset", -1)))
+
+        def _receiver_matches_qualifier(self, node: ast.AST) -> bool:
+            if not qualifier:
+                return True
+            if isinstance(node, ast.Name):
+                return node.id == qualifier or (node.id == "self" and bool(self.class_stack) and self.class_stack[-1] == qualifier)
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name):
+                    return func.id == qualifier
+                if isinstance(func, ast.Attribute):
+                    return func.attr == qualifier
+            if isinstance(node, ast.Attribute):
+                return node.attr == qualifier
+            return False
 
         def visit_Attribute(self, node: ast.Attribute) -> None:
             if node.attr == bare:
-                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", "high", "attribute", getattr(node, "col_offset", -1)))
+                confidence = "high" if self._receiver_matches_qualifier(node.value) else "low"
+                refs.append(Reference(rel, node.lineno, self._line(node), "python_ast", "exact_range", confidence, "attribute", getattr(node, "col_offset", -1)))
             self.generic_visit(node)
 
     Visitor().visit(tree)
@@ -778,12 +879,13 @@ def _assigned_names(node: ast.AST) -> set[str]:
     return set()
 
 
-def _treesitter_references(rel: str, text: str, target: str) -> list[Reference]:
-    try:
-        from .analyzers.treesitter import parse_for_path
-    except Exception:
-        return []
-    parsed = parse_for_path(rel, text)
+def _treesitter_references(rel: str, text: str, target: str, *, parsed: tuple[object, bytes] | None = None) -> list[Reference]:
+    if parsed is None:
+        try:
+            from .analyzers.treesitter import parse_for_path
+            parsed = parse_for_path(rel, text)
+        except (Exception, RecursionError):
+            return []
     if parsed is None:
         return []
     root, src = parsed
@@ -818,7 +920,10 @@ def _treesitter_references(rel: str, text: str, target: str) -> list[Reference]:
         for child in node.children:
             visit(child)
 
-    visit(root)
+    try:
+        visit(root)
+    except RecursionError:
+        return _dedupe_refs(refs)
     return _dedupe_refs(refs)
 
 
@@ -953,6 +1058,7 @@ def analyze_file(path: str, text: str, *, custom_side_effect_rules: list[tuple] 
             analyze_generic(info, text)
     route_scan = strip_comments_and_docstrings(text, info.lang)
     info.routes = extract_routes(route_scan)
+    info.routes.update(extract_file_routes(path, route_scan))
     info.side_effects = extract_side_effects(text, info.lang, extra_rules=custom_side_effect_rules)
     return info
 
@@ -960,25 +1066,7 @@ def analyze_file(path: str, text: str, *, custom_side_effect_rules: list[tuple] 
 def _extract_imports_only(info: FileInfo, text: str) -> None:
     """When tree-sitter handles symbols, still run the regex pass for imports/raw_imports
     so the dependency graph still works."""
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith(("//", "#", "/*", "*")):
-            continue
-        for m in _REQUIRE_PATTERN.finditer(line):
-            target = m.group(1)
-            info.imports.append(target)
-            info.raw_imports.append((0, target))
-        for m in _IMPORT_FROM_PATTERN.finditer(line):
-            target = m.group(1)
-            info.imports.append(target)
-            info.raw_imports.append((0, target))
-        for m in _GO_IMPORT_PATTERN.finditer(line):
-            target = m.group(1)
-            info.imports.append(target)
-            info.raw_imports.append((0, target))
-        for m in _RUST_USE_PATTERN.finditer(line):
-            target = m.group(1)
-            info.imports.append(target)
-            info.raw_imports.append((0, target))
+    _extract_regex_imports(info, text)
 
 
 def analyze_python(info: FileInfo, text: str) -> None:
@@ -1105,6 +1193,139 @@ _REQUIRE_PATTERN = re.compile(r"""\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)""")
 _IMPORT_FROM_PATTERN = re.compile(r"""\b(?:import|from|export\s+(?:\*|\{[^}]*\}))\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]""")
 _GO_IMPORT_PATTERN = re.compile(r"""^\s*(?:import\s+)?(?:[A-Za-z_]\w*\s+)?['"]([^'"]+)['"]""")
 _RUST_USE_PATTERN = re.compile(r"""^\s*use\s+([A-Za-z_][\w:]*)""")
+_JVM_IMPORT_PATTERN = re.compile(r"""^\s*import\s+(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\.\{[^}]+\})?)\s*;?""")
+_CSHARP_USING_PATTERN = re.compile(r"""^\s*using\s+(?!\(|var\b)(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;""")
+_SWIFT_IMPORT_PATTERN = re.compile(r"""^\s*import\s+(?:@[A-Za-z_]\w+\s+)?([A-Za-z_]\w*)""")
+_PHP_USE_PATTERN = re.compile(r"""^\s*(?:<\?php\s*)?use\s+([A-Za-z_\\][\w\\]*)(?:\s+as\s+\w+)?\s*;""")
+_PHP_INCLUDE_PATTERN = re.compile(r"""\b(?:require|include)(?:_once)?\s*(?:\(\s*)?['"]([^'"]+)['"]""")
+_RUBY_REQUIRE_PATTERN = re.compile(r"""^\s*(require_relative|require)\s+['"]([^'"]+)['"]""")
+_C_INCLUDE_PATTERN = re.compile(r"""^\s*#\s*include\s+["]([^"]+)["]""")
+_ELIXIR_IMPORT_PATTERN = re.compile(r"""^\s*(?:import|alias|use)\s+([A-Z][\w.]*)(?:\s|$)""")
+_RESOLVABLE_EXTS = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".rb", ".php", ".java",
+    ".kt", ".kts", ".scala", ".sc", ".cs", ".swift", ".ex", ".exs", ".c", ".h",
+    ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+)
+
+
+def _camel_to_snake(value: str) -> str:
+    value = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    return value.replace("-", "_").lower()
+
+
+def _module_path_variants(target: str) -> list[str]:
+    normalized = target.strip().strip(";").replace("\\", "/").replace("::", ".")
+    if not normalized:
+        return []
+    variants: list[str] = []
+
+    def add(v: str) -> None:
+        v = v.strip("/")
+        if v and v not in variants:
+            variants.append(v)
+
+    if "/" in normalized:
+        add(normalized)
+    if "." in normalized:
+        add(normalized.replace(".", "/"))
+        add("/".join(_camel_to_snake(part) for part in normalized.split(".")))
+    else:
+        add(normalized)
+        add(_camel_to_snake(normalized))
+    return variants
+
+
+def _module_candidate_suffixes(target_path: str) -> list[str]:
+    suffixes = [
+        f"{target_path}/__init__.py",
+        f"{target_path}/index.js",
+        f"{target_path}/index.ts",
+        f"{target_path}/index.jsx",
+        f"{target_path}/index.tsx",
+    ]
+    if Path(target_path).suffix:
+        suffixes.append(target_path)
+    else:
+        suffixes.extend(f"{target_path}{ext}" for ext in _RESOLVABLE_EXTS)
+    return suffixes
+
+
+def _looks_like_relative_file_import(target: str) -> bool:
+    target = target.replace("\\", "/")
+    return (
+        target.startswith("./")
+        or target.startswith("../")
+        or "/" in target
+        or Path(target).suffix.lower() in _RESOLVABLE_EXTS
+    )
+
+
+def _expand_braced_import(target: str) -> list[str]:
+    m = re.match(r"^(?P<prefix>.+)\.\{(?P<body>[^}]+)\}$", target)
+    if not m:
+        return [target]
+    prefix = m.group("prefix")
+    return [f"{prefix}.{part.strip()}" for part in m.group("body").split(",") if part.strip()]
+
+
+def _add_import(info: FileInfo, display: str, target: str, seen: set[tuple[int, str]]) -> None:
+    if not target:
+        return
+    key = (0, target)
+    if key in seen:
+        return
+    seen.add(key)
+    info.imports.append(display)
+    info.raw_imports.append(key)
+
+
+def _extract_regex_imports(info: FileInfo, text: str) -> None:
+    seen = set(info.raw_imports)
+    lang = info.lang
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "/*", "*")):
+            continue
+        for m in _REQUIRE_PATTERN.finditer(line):
+            _add_import(info, m.group(1), m.group(1), seen)
+        for m in _IMPORT_FROM_PATTERN.finditer(line):
+            _add_import(info, m.group(1), m.group(1), seen)
+        if lang == "Go":
+            for m in _GO_IMPORT_PATTERN.finditer(line):
+                target = m.group(1)
+                if "/" in target or "." not in target:
+                    _add_import(info, stripped, target, seen)
+        if lang == "Rust":
+            for m in _RUST_USE_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1).replace("::", "."), seen)
+        if lang in {"Java", "Kotlin", "Scala"}:
+            for m in _JVM_IMPORT_PATTERN.finditer(line):
+                for target in _expand_braced_import(m.group(1)):
+                    _add_import(info, stripped, target, seen)
+        if lang == "C#":
+            for m in _CSHARP_USING_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1), seen)
+        if lang == "Swift":
+            for m in _SWIFT_IMPORT_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1), seen)
+        if lang == "PHP":
+            for m in _PHP_USE_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1), seen)
+            for m in _PHP_INCLUDE_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1), seen)
+        if lang == "Ruby":
+            for m in _RUBY_REQUIRE_PATTERN.finditer(line):
+                target = m.group(2)
+                if m.group(1) == "require_relative" and not target.startswith(("./", "../")):
+                    target = f"./{target}"
+                _add_import(info, stripped, target, seen)
+        if lang in {"C", "C++"}:
+            for m in _C_INCLUDE_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1), seen)
+        if lang == "Elixir":
+            for m in _ELIXIR_IMPORT_PATTERN.finditer(line):
+                _add_import(info, stripped, m.group(1), seen)
 
 
 def analyze_generic(info: FileInfo, text: str) -> None:
@@ -1120,25 +1341,7 @@ def analyze_generic(info: FileInfo, text: str) -> None:
         if m := re.search(r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>", line):
             info.symbols.append(Symbol(m.group(1), "function", info.path, i))
         stripped = line.strip()
-        # Anywhere-in-line: require('...'), import ... from '...', export ... from '...'
-        for match in _REQUIRE_PATTERN.finditer(line):
-            target = match.group(1)
-            info.imports.append(stripped or line.strip())
-            info.raw_imports.append((0, target))
-        for match in _IMPORT_FROM_PATTERN.finditer(line):
-            target = match.group(1)
-            info.imports.append(stripped or line.strip())
-            info.raw_imports.append((0, target))
-        if lang == "Rust":
-            for match in _RUST_USE_PATTERN.finditer(line):
-                info.imports.append(stripped)
-                info.raw_imports.append((0, match.group(1).replace("::", ".")))
-        if lang == "Go":
-            for match in _GO_IMPORT_PATTERN.finditer(line):
-                target = match.group(1)
-                if "/" in target or "." not in target:
-                    info.imports.append(stripped)
-                    info.raw_imports.append((0, target))
+    _extract_regex_imports(info, text)
 
 
 # Routes are normalized to "<METHOD> <path>" → handler symbol.
@@ -1224,6 +1427,17 @@ _ROUTES_ASPNET_ROUTE_RE = re.compile(
     r"[\s\S]{0,200}?\b(?:public|private|protected|internal)\s+[\w<>\[\],?\s]*?\s+(?P<handler>[A-Za-z_]\w*)\s*\("
 )
 
+_ROUTES_PHOENIX_RE = re.compile(
+    r"^\s*(?P<method>get|post|put|patch|delete|options|head)\s+"
+    r"['\"](?P<path>[^'\"]+)['\"]\s*,\s*(?P<controller>[A-Za-z_][\w.]*)\s*,\s*:(?P<action>[A-Za-z_]\w*)",
+    re.M,
+)
+_ROUTES_KTOR_RE = re.compile(
+    r"\b(?P<method>get|post|put|patch|delete|options|head)\(\s*['\"](?P<path>[^'\"]+)['\"]\s*\)\s*\{",
+    re.I,
+)
+_NEXT_METHOD_RE = re.compile(r"\bexport\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*\(", re.I)
+
 
 def _add_route(routes: dict, method: str, path: str, handler: str) -> None:
     if not path or not handler:
@@ -1289,7 +1503,46 @@ def extract_routes(text: str) -> dict[str, str]:
         _add_route(routes, m.group("method"), m.group("path"), m.group("handler"))
     for m in _ROUTES_ASPNET_ROUTE_RE.finditer(text):
         _add_route(routes, "ANY", m.group("path"), m.group("handler"))
+    for m in _ROUTES_PHOENIX_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path"), f"{m.group('controller')}.{m.group('action')}")
+    for m in _ROUTES_KTOR_RE.finditer(text):
+        _add_route(routes, m.group("method"), m.group("path"), "block")
     return routes
+
+
+def extract_file_routes(path: str, text: str) -> dict[str, str]:
+    routes: dict[str, str] = {}
+    rel = path.replace("\\", "/")
+    parts = rel.split("/")
+    if len(parts) >= 3 and parts[-1] in {"route.ts", "route.tsx", "route.js", "route.jsx"} and "app" in parts:
+        app_i = parts.index("app")
+        route_parts = [p for p in parts[app_i + 1:-1] if not (p.startswith("(") and p.endswith(")"))]
+        route_path = "/" + "/".join(_next_route_segment(p) for p in route_parts)
+        methods = [m.group(1).upper() for m in _NEXT_METHOD_RE.finditer(text)]
+        for method in methods or ["ANY"]:
+            _add_route(routes, method, route_path, method)
+    if len(parts) >= 3 and "pages" in parts:
+        pages_i = parts.index("pages")
+        if pages_i + 1 < len(parts) and parts[pages_i + 1] == "api":
+            route_parts = parts[pages_i + 2:]
+            route_parts[-1] = Path(route_parts[-1]).stem
+            if route_parts[-1] == "index":
+                route_parts = route_parts[:-1]
+            route_path = "/api" + ("/" + "/".join(_next_route_segment(p) for p in route_parts) if route_parts else "")
+            methods = [m.group(1).upper() for m in _NEXT_METHOD_RE.finditer(text)]
+            for method in methods or ["ANY"]:
+                _add_route(routes, method, route_path, method)
+    return routes
+
+
+def _next_route_segment(segment: str) -> str:
+    if segment.startswith("[[...") and segment.endswith("]]"):
+        return "{" + segment[5:-2] + "*}"
+    if segment.startswith("[...") and segment.endswith("]"):
+        return "{" + segment[4:-1] + "*}"
+    if segment.startswith("[") and segment.endswith("]"):
+        return "{" + segment[1:-1] + "}"
+    return segment
 
 
 _SIDE_EFFECT_CHECKS = [
@@ -1397,6 +1650,19 @@ def _strip_python(text: str) -> str:
 _C_LIKE_BLOCK = re.compile(r"/\*.*?\*/", re.DOTALL)
 _C_LIKE_LINE = re.compile(r"//[^\n]*")
 _HASH_LINE = re.compile(r"#[^\n]*")
+_STRING_FOR_REFS = re.compile(
+    r"""(?P<prefix>[rubfRUBF]{0,3})(?P<quote>'''|\"\"\"|'|")(?P<body>.*?)(?P=quote)""",
+    re.DOTALL,
+)
+
+
+def _strip_strings_for_refs(text: str) -> str:
+    """Remove string literal contents for regex reference fallback while
+    preserving newlines so reported line numbers remain stable."""
+    def repl(match: re.Match) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    return _STRING_FOR_REFS.sub(repl, text)
 
 
 def _strip_c_like(text: str) -> str:

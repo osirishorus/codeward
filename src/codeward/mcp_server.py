@@ -117,11 +117,17 @@ def create_server():
     # ---- Search ---------------------------------------------------------
 
     @mcp.tool()
-    def codeward_search(query: str, per_file: int = 5) -> dict:
+    def codeward_search(query: str, per_file: int = 5, regex: bool = False, ignore_case: bool = False) -> dict:
         """Grouped, indexed search across the repo. Prefer this over raw
         grep — results are grouped by file with line numbers and stable
         ordering."""
-        return _run(_cli.cmd_search, _ns(query=query, per_file=per_file))
+        return _run(_cli.cmd_search, _ns(query=query, per_file=per_file, regex=regex, ignore_case=ignore_case))
+
+    @mcp.tool()
+    def codeward_todos(target: str | None = None) -> dict:
+        """TODO/FIXME/HACK/XXX/BUG comment markers grouped by file. Scans
+        comments only so markers inside string literals are ignored."""
+        return _run(_cli.cmd_todos, _ns(target=target))
 
     # ---- Symbol-level ---------------------------------------------------
 

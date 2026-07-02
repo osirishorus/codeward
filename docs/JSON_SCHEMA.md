@@ -78,6 +78,8 @@ Backwards compatibility: fields will only ever be **added**. Existing keys won't
 {
   "command": "search",
   "query": "UserService",
+  "regex": false,
+  "ignore_case": false,
   "total_matches": 7,
   "files": [
     {
@@ -89,6 +91,27 @@ Backwards compatibility: fields will only ever be **added**. Existing keys won't
   ]
 }
 ```
+
+`regex` and `ignore_case` are present on v0.6.0+ payloads and mirror `--regex`
+and `-i/--ignore-case`.
+
+## `codeward todos --json [target]`
+
+```json
+{
+  "command": "todos",
+  "target": null,
+  "total": 2,
+  "todos": {
+    "src/app.py": [
+      {"line": 12, "marker": "TODO", "text": "wire the adapter", "raw": "# TODO: wire the adapter"}
+    ]
+  }
+}
+```
+
+`todos` scans comment fragments for `TODO`, `FIXME`, `HACK`, `XXX`, and `BUG`.
+Markers inside string literals are not reported by the intended contract.
 
 ## `codeward symbol --json <name>`
 

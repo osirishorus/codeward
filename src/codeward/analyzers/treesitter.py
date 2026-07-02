@@ -181,35 +181,39 @@ def analyze_treesitter(info, text: str) -> bool:
 
     from ..index import Symbol  # local import to avoid cycle
 
-    if lang == "go":
-        _extract_go(tree.root_node, src, info, Symbol)
-    elif lang == "rust":
-        _extract_rust(tree.root_node, src, info, Symbol)
-    elif lang in ("typescript", "tsx", "javascript"):
-        _extract_jsts(tree.root_node, src, info, Symbol, ts_mode=(lang in ("typescript", "tsx")))
-    elif lang == "java":
-        _extract_java(tree.root_node, src, info, Symbol)
-    elif lang == "ruby":
-        _extract_ruby(tree.root_node, src, info, Symbol)
-    elif lang == "php":
-        _extract_php(tree.root_node, src, info, Symbol)
-    elif lang == "csharp":
-        _extract_csharp(tree.root_node, src, info, Symbol)
-    elif lang in ("c", "cpp"):
-        _extract_c_family(tree.root_node, src, info, Symbol, cpp=(lang == "cpp"))
-    elif lang == "kotlin":
-        _extract_kotlin(tree.root_node, src, info, Symbol)
-    elif lang == "swift":
-        _extract_swift(tree.root_node, src, info, Symbol)
-    elif lang == "scala":
-        _extract_scala(tree.root_node, src, info, Symbol)
-    elif lang == "bash":
-        _extract_bash(tree.root_node, src, info, Symbol)
-    elif lang == "lua":
-        _extract_lua(tree.root_node, src, info, Symbol)
-    elif lang == "elixir":
-        _extract_elixir(tree.root_node, src, info, Symbol)
-    else:
+    try:
+        if lang == "go":
+            _extract_go(tree.root_node, src, info, Symbol)
+        elif lang == "rust":
+            _extract_rust(tree.root_node, src, info, Symbol)
+        elif lang in ("typescript", "tsx", "javascript"):
+            _extract_jsts(tree.root_node, src, info, Symbol, ts_mode=(lang in ("typescript", "tsx")))
+        elif lang == "java":
+            _extract_java(tree.root_node, src, info, Symbol)
+        elif lang == "ruby":
+            _extract_ruby(tree.root_node, src, info, Symbol)
+        elif lang == "php":
+            _extract_php(tree.root_node, src, info, Symbol)
+        elif lang == "csharp":
+            _extract_csharp(tree.root_node, src, info, Symbol)
+        elif lang in ("c", "cpp"):
+            _extract_c_family(tree.root_node, src, info, Symbol, cpp=(lang == "cpp"))
+        elif lang == "kotlin":
+            _extract_kotlin(tree.root_node, src, info, Symbol)
+        elif lang == "swift":
+            _extract_swift(tree.root_node, src, info, Symbol)
+        elif lang == "scala":
+            _extract_scala(tree.root_node, src, info, Symbol)
+        elif lang == "bash":
+            _extract_bash(tree.root_node, src, info, Symbol)
+        elif lang == "lua":
+            _extract_lua(tree.root_node, src, info, Symbol)
+        elif lang == "elixir":
+            _extract_elixir(tree.root_node, src, info, Symbol)
+        else:
+            return False
+    except RecursionError:
+        info.symbols.clear()
         return False
     _link_methods_to_classes(info)
     return True

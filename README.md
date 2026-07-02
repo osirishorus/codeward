@@ -151,7 +151,8 @@ All read-only commands support `--json`.
 |---|---|---|
 | `codeward map` | Repo overview: language, important files, suggested next steps | `find . -maxdepth 3 -type f` |
 | `codeward read <file>` | Symbols + signatures + dependents + tests + side effects (`--flow` adds method bodies) | `cat <file>` |
-| `codeward search <query>` | Index-grouped search hits | `grep -rn <query>` |
+| `codeward search [--regex] [-i] <query>` | Index-grouped search hits with optional regex / ignore-case matching | `grep -rn <query>` |
+| `codeward todos [target]` | TODO/FIXME/HACK/XXX/BUG comment markers grouped by file | `grep -rn TODO` |
 | `codeward symbol <name>` | Definition + ranked callers + tests | grep + sed |
 | `codeward slice <Class.method>` | **Exact bytes of one method** | `sed -n 'X,Yp'` |
 | `codeward refs <symbol>` | Ranked reference sites (file:line) | recursive grep |

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codeward"
-version = "0.5.2"
+version = "0.6.0"
 description = "Semantic codebase intelligence CLI for coding agents — composes with RTK"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -79,6 +79,14 @@ codeward = "codeward.cli:main"
 addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 200
+exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -63,6 +63,7 @@ def test_create_server_registers_expected_tools():
         "codeward_owners",
         "codeward_hotspots", "codeward_neighbors", "codeward_pack",
         "codeward_budget", "codeward_doctor", "codeward_diff_pack",
+        "codeward_todos",
     }
     assert names == expected
 
