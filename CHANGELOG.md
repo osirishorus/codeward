@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- **`codeward pr-report [--base <ref>] [--security]`** — GitHub-flavored Markdown PR report combining symbol-level `sdiff`, review findings, affected files, minimal tests, and a sticky-comment marker; ships with a composite GitHub Action and dogfood workflow.
+
+### Changed
+
+- **`codeward watch`** — incremental watch mode now debounces/coalesces file events, skips unchanged files by mtime+size, reuses tree-sitter incremental reparses through a bounded LRU cache, and exposes `--debounce-ms` plus `--stats`.
+
 ## [0.6.0] - 2026-07-02
 
 ### Added

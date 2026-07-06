@@ -147,6 +147,14 @@ def _looks_like_cpp_header(text: str) -> bool:
 
 
 def parse_for_path(path: str, text: str):
+    parsed = parse_tree_for_path(path, text)
+    if parsed is None:
+        return None
+    tree, src = parsed
+    return tree.root_node, src
+
+
+def parse_tree_for_path(path: str, text: str):
     lang = language_for_path(path, text)
     if lang is None:
         return None
@@ -155,9 +163,59 @@ def parse_for_path(path: str, text: str):
         return None
     try:
         src = text.encode("utf-8")
-        return parser.parse(src).root_node, src
+        return parser.parse(src), src
     except Exception:
         return None
+
+
+def parse_for_path_incremental(path: str, text: str, old_tree, old_src: bytes):
+    lang = language_for_path(path, text)
+    if lang is None:
+        return None
+    parser = _get_parser(lang)
+    if parser is None:
+        return None
+    try:
+        src = text.encode("utf-8")
+        start, old_end, new_end = _changed_byte_range(old_src, src)
+        old_tree.edit(
+            start_byte=start,
+            old_end_byte=old_end,
+            new_end_byte=new_end,
+            start_point=_point_for_offset(old_src, start),
+            old_end_point=_point_for_offset(old_src, old_end),
+            new_end_point=_point_for_offset(src, new_end),
+        )
+        return parser.parse(src, old_tree), src
+    except Exception:
+        return None
+
+
+def _changed_byte_range(old_src: bytes, new_src: bytes) -> tuple[int, int, int]:
+    prefix = 0
+    max_prefix = min(len(old_src), len(new_src))
+    while prefix < max_prefix and old_src[prefix] == new_src[prefix]:
+        prefix += 1
+
+    suffix = 0
+    max_suffix = min(len(old_src) - prefix, len(new_src) - prefix)
+    while suffix < max_suffix and old_src[len(old_src) - 1 - suffix] == new_src[len(new_src) - 1 - suffix]:
+        suffix += 1
+
+    old_end = len(old_src) - suffix
+    new_end = len(new_src) - suffix
+    return prefix, old_end, new_end
+
+
+def _point_for_offset(src: bytes, offset: int) -> tuple[int, int]:
+    offset = max(0, min(offset, len(src)))
+    row = src.count(b"\n", 0, offset)
+    last_newline = src.rfind(b"\n", 0, offset)
+    if last_newline == -1:
+        column = offset
+    else:
+        column = offset - last_newline - 1
+    return row, column
 
 
 def analyze_treesitter(info, text: str) -> bool:
@@ -167,18 +225,17 @@ def analyze_treesitter(info, text: str) -> bool:
     tree-sitter just gives us better symbol shapes."""
     if not HAS_TREE_SITTER:
         return False
+    parsed = parse_tree_for_path(info.path, text)
+    if parsed is None:
+        return False
+    tree, src = parsed
+    return analyze_treesitter_from_tree(info, text, tree, src)
+
+
+def analyze_treesitter_from_tree(info, text: str, tree, src: bytes) -> bool:
     lang = language_for_path(info.path, text)
     if lang is None:
         return False
-    parser = _get_parser(lang)
-    if parser is None:
-        return False
-    try:
-        src = text.encode("utf-8")
-        tree = parser.parse(src)
-    except Exception:
-        return False
-
     from ..index import Symbol  # local import to avoid cycle
 
     try:

@@ -12,7 +12,7 @@
   <sub>Running against the real <a href="https://github.com/fastapi/fastapi">fastapi/fastapi</a> codebase · <a href="demo/codeward-demo.mp4">MP4</a> · <a href="demo/">how it's built</a></sub>
 </p>
 
-Codeward gives your agent commands the shell can't: "where is this defined?", "who calls it?", "which tests cover it?", "what changed at the symbol level?", "what would break if I edit this file?", "what handles this URL?". It indexes your repo with tree-sitter / Python AST.
+Agents burn tokens re-deriving structure with `grep`, `cat`, and raw diffs. Codeward answers structural questions from a local tree-sitter / Python AST index in one line: definitions, callers, tests, routes, symbol diffs, blast radius. It also turns that same index into symbol-aware PR review in CI.
 
 ```text
 What does this repo do?            →  codeward map
@@ -23,6 +23,7 @@ What handles POST /api/users?      →  codeward routes --filter /api/users
 What tests cover this file?        →  codeward tests-for fastapi/routing.py
 Who wrote this method?             →  codeward blame APIRoute.get_route_handler
 What changed at the symbol level?  →  codeward sdiff --base HEAD~1
+What should this PR reviewer know? →  codeward pr-report --base origin/main --security
 What's the public API of this?     →  codeward api fastapi/applications.py
 What could break if I edit this?   →  codeward preflight fastapi/routing.py  (auto-injected on Edit/Write)
 Which tests should CI run?         →  codeward affected --changed
@@ -79,7 +80,38 @@ codeward map       # repo overview — auto-builds the index on first run
 codeward doctor    # verify environment
 ```
 
-The index auto-builds on the first read-only command and lives at `.codeward/index.sqlite` with mtime invalidation. Run `codeward index` only to pre-warm a large repo or in CI; for long sessions use `codeward watch` (foreground re-indexer).
+The index auto-builds on the first read-only command and lives at `.codeward/index.sqlite` with mtime invalidation. Run `codeward index` only to pre-warm a large repo or in CI; for long sessions use `codeward watch` (foreground re-indexer with debounced batches and incremental tree-sitter reparses).
+
+## CI: symbol-aware PR review
+
+```yaml
+name: Codeward PR report
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  codeward-pr-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: osirishorus/codeward@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          security: "true"
+          comment: "true"
+          python-version: "3.12"
+```
+
+Inputs: `base` (default: `""`; uses the pull request base, then repository default branch), `security` (default: `"true"`), `comment` (default: `"true"`), `python-version` (default: `"3.12"`), `from-source` (default: `"false"`). Full workflow: [docs/CODEWARD_PR_WORKFLOW.md](docs/CODEWARD_PR_WORKFLOW.md).
 
 ## Optional: hook integration
 
@@ -163,6 +195,7 @@ All read-only commands support `--json`.
 | `codeward budget [target]` | Token hotspot audit + cheaper command recommendations | blind `cat`/`find` exploration |
 | `codeward pack <target>` | Budgeted context bundle for a file/dir/symbol/query | dumping many files into context |
 | `codeward diff-pack [--changed] [--base <ref>]` | Budgeted changed-code bundle for branch understanding/review | raw diff spelunking |
+| `codeward pr-report [--base <ref>] [--security]` | GitHub-flavored Markdown PR report for CI comments and step summaries | stitching semantic diff + review + test selection by hand |
 | `codeward hotspots [--since 90d]` | Files ranked by churn × dependents — where bugs concentrate | `git log` + `wc -l` + intuition |
 | `codeward neighbors <file>` | Files that historically change together with `<file>` | scanning `git log --name-only` by hand |
 | `codeward affected [--changed\|<target>]` | Transitive blast radius of a change + the minimal tests to run (CI test-selection) | guessing which tests to run |
@@ -186,7 +219,7 @@ Precision depends on the analyzer for the file. `--json` output annotates each r
 
 - `codeward gain [--repo\|--all]` — token savings history (defaults to **global** across all repos; `--repo` for the current repo only)
 - `codeward doctor` — environment / hook ordering / index health
-- `codeward index` / `codeward watch` — explicit / continuous indexing
+- `codeward index` / `codeward watch [--debounce-ms N] [--stats]` — explicit / continuous indexing; watch debounces editor bursts and reuses incremental tree-sitter parses
 - `codeward init [--hook] [--global] [--gemini] [--codex] [--no-hook-bash] [--no-hook-edit]` — vocabulary + optional hooks
 - `codeward hook --agent {claude,cursor,gemini,codex,generic}` — agent hook adapter (stdin → stdout)
 - `codeward mcp [--cwd <path>]` — MCP server on stdio. One config entry exposes all read-only commands to any MCP client (Claude Desktop, Cursor, Continue, Zed, Cline, Goose, Windsurf, ChatGPT Desktop). Install with `pip install 'codeward[mcp]'`

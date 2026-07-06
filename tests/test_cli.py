@@ -1481,6 +1481,38 @@ def test_sdiff_detects_added_symbol(sample_repo):
     assert "brand_new_helper" in added_names
 
 
+def test_pr_report_text_includes_marker_title_and_sections(sample_repo):
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text(target.read_text() + "\n\ndef branch_helper():\n    return 1\n")
+
+    result = run_cli(["pr-report", "--base", "HEAD", "--security"], sample_repo)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("<!-- codeward-pr-report -->")
+    assert "### Codeward PR report" in result.stdout
+    assert "Symbol-level diff" in result.stdout
+    assert "Review findings" in result.stdout
+    assert "Affected files" in result.stdout
+    assert "<details>" in result.stdout
+
+
+def test_pr_report_json_includes_structured_payload(sample_repo):
+    target = sample_repo / "src" / "services" / "user_service.py"
+    target.write_text(target.read_text() + "\n\ndef branch_helper():\n    return 1\n")
+
+    result = run_cli(["pr-report", "--json", "--base", "HEAD", "--security"], sample_repo)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "pr-report"
+    assert payload["base"] == "HEAD"
+    assert payload["security"] is True
+    assert payload["diff"]["command"] == "sdiff"
+    assert payload["review"]["command"] == "review"
+    assert payload["affected"]["command"] == "affected"
+    assert payload["affected"]["test_command"]
+
+
 def test_review_changed_reports_actually_changed_symbols(sample_repo):
     target = sample_repo / "src" / "services" / "user_service.py"
     target.write_text(target.read_text() + "\n\ndef branch_helper():\n    return 1\n")

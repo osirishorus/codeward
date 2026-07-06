@@ -243,6 +243,64 @@ Test files are excluded by default; pass `--include-tests` to include fixture ro
 
 `affected_files` is the transitive closure of the seeds over the reverse-dependency graph (every file that directly or indirectly imports a seed), capped at `--depth` hops when given. `runner` is the detected test runner (`pytest`, `jest`, `vitest`, `go`, `npm`, or `null`). `test_command` is empty when no indexed file is affected; for non-pytest runners it falls back to the full-suite command. `--tests-only` prints just `test_command` as plain text (no JSON).
 
+## `codeward pr-report --json [--base <ref>] [--security]`
+
+```json
+{
+  "command": "pr-report",
+  "base": "origin/main",
+  "security": true,
+  "diff": {
+    "command": "sdiff",
+    "base": "origin/main",
+    "files": [
+      {
+        "file": "src/services/user_service.py",
+        "status": "modified",
+        "added": [{"name": "new_helper", "signature": "def new_helper()"}],
+        "removed": [],
+        "changed": []
+      }
+    ]
+  },
+  "review": {
+    "command": "review",
+    "files": [
+      {
+        "file": "src/services/user_service.py",
+        "analyzer": "python_ast",
+        "precision": "exact_range",
+        "confidence": "high",
+        "symbols": [{"name": "UserService", "kind": "class", "analyzer": "python_ast", "precision": "exact_range", "confidence": "high"}],
+        "changed_symbols": [{"name": "new_helper", "change": "added"}],
+        "risks": ["DB write"],
+        "security_findings": [],
+        "tests": ["tests/test_user_service.py"],
+        "hotspot": false,
+        "commits_90d": 0,
+        "semantic_risk_summary": "1 changed symbols; side effects: DB write"
+      }
+    ],
+    "security_findings": [],
+    "suggested_command": "pytest tests/test_user_service.py",
+    "semantic_risk_summary": [
+      {"file": "src/services/user_service.py", "summary": "1 changed symbols; side effects: DB write"}
+    ]
+  },
+  "affected": {
+    "command": "affected",
+    "seeds": ["src/services/user_service.py"],
+    "affected_files": ["src/services/user_service.py", "src/controllers/user_controller.py"],
+    "tests": ["tests/test_user_service.py"],
+    "runner": "pytest",
+    "test_command": "pytest tests/test_user_service.py",
+    "stats": {"seed_count": 1, "affected_count": 2, "test_count": 1}
+  }
+}
+```
+
+`pr-report` combines the structured payloads from `sdiff`, `review`, and `affected` into one report. When `--base` is omitted, the base resolves to the merge-base with `origin/main`, then `main`, then `HEAD~1`. Text mode emits GitHub-flavored Markdown whose first line is the sticky-comment marker `<!-- codeward-pr-report -->`, followed by the H3 title `Codeward PR report` and collapsible sections for symbol diff, review findings, affected files, and tests.
+
 ## `codeward why --json <fileA> <fileB> [--direction forward|reverse|any]`
 
 ```json

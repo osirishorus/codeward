@@ -154,7 +154,40 @@ Add to your client's `mcpServers` config (Claude Desktop, Cursor, Continue, Zed,
 
 Every read-only Codeward command becomes a first-class MCP tool. No per-tool hook config.
 
-## 7. Token-savings tracking
+## 7. PR review in CI
+
+Use the composite action when you want the same symbol-aware diff, review, and affected-test context as a sticky PR comment and step summary:
+
+```yaml
+name: Codeward PR report
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  codeward-pr-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: osirishorus/codeward@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          security: "true"
+          comment: "true"
+          python-version: "3.12"
+```
+
+Inputs: `base` (default: `""`; uses the pull request base, then repository default branch), `security` (default: `"true"`), `comment` (default: `"true"`), `python-version` (default: `"3.12"`), `from-source` (default: `"false"`). Full details: [CODEWARD_PR_WORKFLOW.md](CODEWARD_PR_WORKFLOW.md).
+
+## 8. Token-savings tracking
 
 Codeward records every hook-rewritten or directly-invoked semantic command:
 
@@ -175,7 +208,7 @@ During hook usage, Codeward carries the original command via the `CODEWARD_ORIGI
 CODEWARD_ORIGINAL_COMMAND='cat src/app.py' codeward read src/app.py
 ```
 
-## 8. Safe rewrite policy
+## 9. Safe rewrite policy
 
 Codeward rewrites only the simple shell patterns where semantics are preserved.
 
@@ -211,7 +244,7 @@ To bypass rewriting explicitly, prefix with `!raw`:
 !raw cat src/app.py
 ```
 
-## 9. Composing with RTK
+## 10. Composing with RTK
 
 Codeward and RTK own different layers:
 
@@ -226,7 +259,7 @@ With both installed, Codeward's Bash hook is inserted *before* RTK's so the rewr
 
 Codeward never rewrites commands starting with `codeward`, `rtk`, `contextzip`, or `snip`.
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### Hook does nothing
 
@@ -248,7 +281,12 @@ codeward index
 
 ### Long sessions
 
-`codeward watch` runs a foreground re-indexer that keeps the SQLite cache hot via `watchdog` (or 2-second mtime polling if `watchdog` isn't installed).
+`codeward watch` runs a foreground re-indexer that keeps the SQLite cache hot via `watchdog` (or 2-second mtime polling if `watchdog` isn't installed). It debounces editor bursts, skips unchanged files by mtime+size, and reuses incremental tree-sitter reparses when the language analyzer supports it.
+
+```bash
+codeward watch --debounce-ms 200   # coalesce file events within 200 ms
+codeward watch --stats             # print batch and parse-cache stats
+```
 
 ### Agent needs exact raw output
 

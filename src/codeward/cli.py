@@ -153,7 +153,11 @@ def cmd_watch(args) -> int:
     watch keeps that refresh work off the command path on large repos.
     Different surface from RTK (RTK has no daemon); no clash."""
     from .watch import run_watch
-    return run_watch(Path.cwd(), debounce=getattr(args, "debounce", 0.5))
+    debounce = getattr(args, "debounce", None)
+    debounce_ms = getattr(args, "debounce_ms", None)
+    if debounce_ms is not None:
+        debounce = debounce_ms / 1000
+    return run_watch(Path.cwd(), debounce=debounce, stats=getattr(args, "stats", False))
 
 
 def cmd_preflight(args) -> int:
@@ -413,15 +417,15 @@ def cmd_sdiff(args) -> int:
     json_mode = getattr(args, "json_output", False)
     base = getattr(args, "base", None) or "HEAD"
     idx = RepoIndex(Path.cwd())
-    file_rows = _semantic_diff_rows(idx, base)
+    payload = _sdiff_payload(idx, base)
+    file_rows = payload["files"]
     files = [row["file"] for row in file_rows]
     if not files:
         if json_mode:
-            print(json.dumps({"command": "sdiff", "base": base, "files": []}, indent=2))
+            print(json.dumps(payload, indent=2))
         else:
             print(f"No symbol-level changes vs {base}")
         return 0
-    payload = {"command": "sdiff", "base": base, "files": file_rows}
     out = [f"# Codeward semantic diff vs {base}"]
     for r in file_rows:
         out.append(f"\n{r['file']}  ({r['status']})")
@@ -1109,6 +1113,93 @@ def selected_files(idx: RepoIndex, args) -> list[str]:
     return idx.changed_files(getattr(args, "base", None))
 
 
+def _sdiff_payload(idx: RepoIndex, base: str) -> dict:
+    return {"command": "sdiff", "base": base, "files": _semantic_diff_rows(idx, base)}
+
+
+def _review_payload(idx: RepoIndex, files: list[str], base: str, security: bool = False) -> dict:
+    changed_by_file = {row["file"]: row for row in _semantic_diff_rows(idx, base)}
+    churn, hotspot_set = _recent_churn_and_hotspots(idx)
+    rows = []
+    all_tests = []
+    all_security: list[dict] = []
+    for f in files:
+        row: dict = {"file": f}
+        if f in idx.files:
+            info = idx.files[f]
+            row["analyzer"] = info.analyzer
+            row["precision"] = info.precision
+            row["confidence"] = info.confidence
+            row["symbols"] = [{"name": s.name, "kind": s.kind, "analyzer": s.analyzer, "precision": s.precision, "confidence": s.confidence} for s in info.symbols]
+            diff_row = changed_by_file.get(f, {"added": [], "removed": [], "changed": []})
+            changed_symbols = (
+                [{"name": s["name"], "change": "added"} for s in diff_row.get("added", [])]
+                + [{"name": s["name"], "change": "removed"} for s in diff_row.get("removed", [])]
+                + [{"name": s["name"], "change": "signature"} for s in diff_row.get("changed", [])]
+            )
+            row["changed_symbols"] = changed_symbols
+            effects = info.side_effects or extract_side_effects(idx.text(f))
+            row["risks"] = effects
+            row["security_findings"] = []
+            if security:
+                for finding in extract_security_findings(idx.text(f), info.lang):
+                    all_security.append({"file": f, "finding": finding})
+                    row["security_findings"].append(finding)
+            tests = idx.tests_for(f)
+            row["tests"] = tests
+            all_tests.extend(tests)
+            row["hotspot"] = f in hotspot_set
+            row["commits_90d"] = churn.get(f, 0)
+            summary_bits = []
+            if changed_symbols:
+                summary_bits.append(f"{len(changed_symbols)} changed symbols")
+            if effects:
+                summary_bits.append(f"side effects: {', '.join(effects[:2])}")
+            if row["hotspot"]:
+                summary_bits.append(f"hotspot ({row['commits_90d']} commits/90d)")
+            if not tests:
+                summary_bits.append("no likely tests found")
+            row["semantic_risk_summary"] = "; ".join(summary_bits) or "no elevated semantic risk detected"
+        rows.append(row)
+    pytests = sorted(set(t for t in all_tests if t.endswith(".py")))
+    suggested = "pytest " + " ".join(pytests) if pytests else "run targeted project tests"
+    semantic_risk_summary = [
+        {"file": row["file"], "summary": row.get("semantic_risk_summary", "not indexed")}
+        for row in rows
+    ]
+    return {
+        "command": "review",
+        "files": rows,
+        "security_findings": all_security,
+        "suggested_command": suggested,
+        "semantic_risk_summary": semantic_risk_summary,
+    }
+
+
+def _affected_payload(idx: RepoIndex, seeds: list[str], depth: int | None = None) -> dict:
+    affected = idx.transitively_affected(seeds, max_depth=depth)
+    tests = sorted({t for f in affected for t in idx.tests_for(f)})
+    runner = _detect_test_runner(idx)
+    pytests = [t for t in tests if t.endswith(".py")]
+    if not affected:
+        test_command = ""
+    elif runner["runner"] == "pytest" and pytests:
+        test_command = "pytest " + " ".join(shlex.quote(t) for t in pytests)
+    elif runner["suite"]:
+        test_command = runner["suite"]
+    else:
+        test_command = ""
+    return {
+        "command": "affected",
+        "seeds": seeds,
+        "affected_files": affected,
+        "tests": tests,
+        "runner": runner["runner"],
+        "test_command": test_command,
+        "stats": {"seed_count": len(seeds), "affected_count": len(affected), "test_count": len(tests)},
+    }
+
+
 def cmd_tests_for(args) -> int:
     idx = RepoIndex(Path.cwd())
     target = args.target
@@ -1170,30 +1261,19 @@ def cmd_review(args) -> int:
     idx = RepoIndex(Path.cwd())
     files = selected_files(idx, args)
     base = getattr(args, "base", None) or "HEAD"
-    changed_by_file = {row["file"]: row for row in _semantic_diff_rows(idx, base)}
-    churn, hotspot_set = _recent_churn_and_hotspots(idx)
-    rows = []
+    security = getattr(args, "security", False)
+    payload = _review_payload(idx, files, base, security=security)
+    rows = payload["files"]
+    all_security = payload["security_findings"]
     out = ["Review summary:"]
     if not files:
         out.append("No changed files found.")
-    all_tests = []
-    all_security: list[dict] = []
-    for f in files:
-        row: dict = {"file": f}
+    for row in rows:
+        f = row["file"]
         out.append(f"\nChanged file: {f}")
         if f in idx.files:
             info = idx.files[f]
-            row["analyzer"] = info.analyzer
-            row["precision"] = info.precision
-            row["confidence"] = info.confidence
-            row["symbols"] = [{"name": s.name, "kind": s.kind, "analyzer": s.analyzer, "precision": s.precision, "confidence": s.confidence} for s in info.symbols]
-            diff_row = changed_by_file.get(f, {"added": [], "removed": [], "changed": []})
-            changed_symbols = (
-                [{"name": s["name"], "change": "added"} for s in diff_row.get("added", [])]
-                + [{"name": s["name"], "change": "removed"} for s in diff_row.get("removed", [])]
-                + [{"name": s["name"], "change": "signature"} for s in diff_row.get("changed", [])]
-            )
-            row["changed_symbols"] = changed_symbols
+            changed_symbols = row.get("changed_symbols", [])
             if changed_symbols:
                 out.append(f"Actually changed symbols ({precision_label(info.analyzer, info.precision, info.confidence)}):")
                 for s in changed_symbols:
@@ -1202,41 +1282,14 @@ def cmd_review(args) -> int:
                 out.append(f"File symbol inventory ({precision_label(info.analyzer, info.precision, info.confidence)}):")
                 for s in info.symbols:
                     out.append(f"- {s.kind} {s.name}  [{precision_label(s.analyzer, s.precision, s.confidence)}]")
-            effects = info.side_effects or extract_side_effects(idx.text(f))
-            row["risks"] = effects
+            effects = row.get("risks", [])
             if effects:
                 out.append("Risks:")
                 for e in effects:
                     out.append(f"- {e}: verify transactional behavior, errors, and tests")
-            row["security_findings"] = []
-            if getattr(args, "security", False):
-                for finding in extract_security_findings(idx.text(f), info.lang):
-                    all_security.append({"file": f, "finding": finding})
-                    row["security_findings"].append(finding)
-            tests = idx.tests_for(f)
-            row["tests"] = tests
-            all_tests.extend(tests)
+            tests = row.get("tests", [])
             out += fmt_list("Missing/related tests to inspect", tests)
-            row["hotspot"] = f in hotspot_set
-            row["commits_90d"] = churn.get(f, 0)
-            summary_bits = []
-            if changed_symbols:
-                summary_bits.append(f"{len(changed_symbols)} changed symbols")
-            if effects:
-                summary_bits.append(f"side effects: {', '.join(effects[:2])}")
-            if row["hotspot"]:
-                summary_bits.append(f"hotspot ({row['commits_90d']} commits/90d)")
-            if not tests:
-                summary_bits.append("no likely tests found")
-            row["semantic_risk_summary"] = "; ".join(summary_bits) or "no elevated semantic risk detected"
-        rows.append(row)
-    pytests = sorted(set(t for t in all_tests if t.endswith(".py")))
-    suggested = "pytest " + " ".join(pytests) if pytests else "run targeted project tests"
-    semantic_risk_summary = [
-        {"file": row["file"], "summary": row.get("semantic_risk_summary", "not indexed")}
-        for row in rows
-    ]
-    if getattr(args, "security", False):
+    if security:
         out.append("\nSecurity findings:")
         if all_security:
             for s in all_security:
@@ -1244,16 +1297,10 @@ def cmd_review(args) -> int:
         else:
             out.append("- none found")
     out.append("\nSuggested commands:")
-    out.append(f"- {suggested}")
+    out.append(f"- {payload['suggested_command']}")
     out.append("- codeward impact --changed")
     if getattr(args, "json_output", False):
-        print(json.dumps({
-            "command": "review",
-            "files": rows,
-            "security_findings": all_security,
-            "suggested_command": suggested,
-            "semantic_risk_summary": semantic_risk_summary,
-        }, indent=2))
+        print(json.dumps(payload, indent=2))
     else:
         print("\n".join(out))
     return 0
@@ -1350,32 +1397,10 @@ def cmd_affected(args) -> int:
     json_mode = getattr(args, "json_output", False)
     seeds = selected_files(idx, args)
     depth = getattr(args, "depth", None)
-    affected = idx.transitively_affected(seeds, max_depth=depth)
-    tests = sorted({t for f in affected for t in idx.tests_for(f)})
-    runner = _detect_test_runner(idx)
-    pytests = [t for t in tests if t.endswith(".py")]
-    # Base the command on `affected` (the indexed closure), not raw seeds:
-    # non-code changes (config, the .codeward cache itself) reach no indexed
-    # file and must not trigger a full-suite run.
-    if not affected:
-        test_command = ""
-    elif runner["runner"] == "pytest" and pytests:
-        test_command = "pytest " + " ".join(shlex.quote(t) for t in pytests)
-    elif runner["suite"]:
-        # Affected files exist but tests aren't per-file mappable (jest/go) or
-        # none were found: fall back to the full suite, never an empty string.
-        test_command = runner["suite"]
-    else:
-        test_command = ""
-    payload = {
-        "command": "affected",
-        "seeds": seeds,
-        "affected_files": affected,
-        "tests": tests,
-        "runner": runner["runner"],
-        "test_command": test_command,
-        "stats": {"seed_count": len(seeds), "affected_count": len(affected), "test_count": len(tests)},
-    }
+    payload = _affected_payload(idx, seeds, depth=depth)
+    affected = payload["affected_files"]
+    tests = payload["tests"]
+    test_command = payload["test_command"]
     if getattr(args, "tests_only", False) and not json_mode:
         print(test_command)
         return 0
@@ -1391,6 +1416,122 @@ def cmd_affected(args) -> int:
         print(json.dumps(payload, indent=2, default=str))
     else:
         print("\n".join(out))
+    return 0
+
+
+def _git_ref_ok(ref: str) -> bool:
+    cp = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref], cwd=Path.cwd(), text=True, capture_output=True)
+    return cp.returncode == 0
+
+
+def _default_pr_report_base(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    cp = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=Path.cwd(), text=True, capture_output=True)
+    if cp.returncode == 0 and cp.stdout.strip():
+        return cp.stdout.strip()
+    if _git_ref_ok("main"):
+        return "main"
+    return "HEAD~1"
+
+
+def _markdown_bullets(items: list[str], empty: str = "none") -> list[str]:
+    if not items:
+        return [f"- {empty}"]
+    return [f"- `{item}`" for item in items]
+
+
+def _render_pr_report_markdown(payload: dict) -> list[str]:
+    diff = payload["diff"]
+    review = payload["review"]
+    affected = payload["affected"]
+    lines = [
+        "<!-- codeward-pr-report -->",
+        "### Codeward PR report",
+        "",
+        f"- Base: `{payload['base']}`",
+        f"- Security heuristics: {'enabled' if payload['security'] else 'disabled'}",
+        f"- Changed files: {len(affected['seeds'])}",
+        f"- Affected files: {len(affected['affected_files'])}",
+        f"- Tests selected: {len(affected['tests'])}",
+        "",
+        "<details>",
+        f"<summary>Symbol-level diff ({len(diff['files'])} file(s))</summary>",
+        "",
+        "#### Symbol-level diff",
+    ]
+    if not diff["files"]:
+        lines.append("- No symbol-level changes found.")
+    for row in diff["files"]:
+        lines.append(f"- `{row['file']}` ({row['status']})")
+        for added in row.get("added", []):
+            lines.append(f"  - Added `{added['signature'] or added['name']}`")
+        for removed in row.get("removed", []):
+            lines.append(f"  - Removed `{removed['signature'] or removed['name']}`")
+        for changed in row.get("changed", []):
+            lines.append(f"  - Changed `{changed['name']}`")
+            lines.append(f"    - before: `{changed['before']}`")
+            lines.append(f"    - after: `{changed['after']}`")
+    lines += [
+        "",
+        "</details>",
+        "",
+        "<details>",
+        f"<summary>Review findings ({len(review['files'])} file(s))</summary>",
+        "",
+        "#### Review findings",
+    ]
+    if not review["files"]:
+        lines.append("- No changed files found.")
+    for row in review["files"]:
+        lines.append(f"- `{row['file']}`: {row.get('semantic_risk_summary', 'not indexed')}")
+        for risk in row.get("risks", []):
+            lines.append(f"  - Risk: {risk}")
+        for finding in row.get("security_findings", []):
+            lines.append(f"  - Security: {finding}")
+    if payload["security"] and not review["security_findings"]:
+        lines.append("- Security findings: none found")
+    lines += [
+        "",
+        "</details>",
+        "",
+        "<details>",
+        f"<summary>Affected files and tests ({affected['stats']['affected_count']} affected, {affected['stats']['test_count']} tests)</summary>",
+        "",
+        "#### Affected files",
+        "",
+        "**Seeds**",
+        *_markdown_bullets(affected["seeds"]),
+        "",
+        "**Transitively affected files**",
+        *_markdown_bullets(affected["affected_files"]),
+        "",
+        "**Minimal covering test set**",
+        *_markdown_bullets(affected["tests"]),
+        "",
+        f"**Ready-to-run test command:** `{affected['test_command'] or '(no runner detected)'}`",
+        "",
+        "</details>",
+    ]
+    return lines
+
+
+def cmd_pr_report(args) -> int:
+    idx = RepoIndex(Path.cwd())
+    json_mode = getattr(args, "json_output", False)
+    base = _default_pr_report_base(getattr(args, "base", None))
+    security = getattr(args, "security", False)
+    seeds = idx.changed_files(base)
+    payload = {
+        "command": "pr-report",
+        "base": base,
+        "security": security,
+        "diff": _sdiff_payload(idx, base),
+        "review": _review_payload(idx, seeds, base, security=security),
+        "affected": _affected_payload(idx, seeds),
+    }
+    lines = _render_pr_report_markdown(payload)
+    emit_tracked(lines, "pr-report", payload=payload, json_mode=json_mode)
     return 0
 
 
@@ -2901,7 +3042,9 @@ def build_parser() -> argparse.ArgumentParser:
     ro.add_argument("--include-tests", action="store_true", help="Include routes declared in test files/fixtures")
     ro.set_defaults(func=cmd_routes)
     wt = sub.add_parser("watch")
-    wt.add_argument("--debounce", type=float, default=0.5, help="Coalesce file events within this many seconds (default: 0.5)")
+    wt.add_argument("--debounce", type=float, default=0.2, help="Coalesce file events within this many seconds (default: 0.2)")
+    wt.add_argument("--debounce-ms", type=int, help="Coalesce file events within this many milliseconds")
+    wt.add_argument("--stats", action="store_true", help="Print batch reanalysis and parse-cache statistics")
     wt.set_defaults(func=cmd_watch)
     te = sub.add_parser("test"); te.add_argument("--force", action="store_true", help="Run even when RTK is installed"); te.add_argument("command", nargs=argparse.REMAINDER); te.set_defaults(func=cmd_test)
     ix = sub.add_parser("index"); ix.add_argument("--output"); ix.set_defaults(func=cmd_index)
@@ -2922,6 +3065,10 @@ def build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--top-symbols", type=int, default=6)
     dp.add_argument("--security", action="store_true")
     dp.set_defaults(func=cmd_diff_pack)
+    pr = sub.add_parser("pr-report", parents=[common], help="Markdown PR report: semantic diff, review findings, and affected tests")
+    pr.add_argument("--base", help="Diff base ref (default: merge-base with origin/main, else main, else HEAD~1)")
+    pr.add_argument("--security", action="store_true", help="Include security review heuristics")
+    pr.set_defaults(func=cmd_pr_report)
     hs = sub.add_parser("hotspots", parents=[common], help="Rank files by risk = recent churn x dependents")
     hs.add_argument("--since", default="90d", help="Git log window, e.g. 30d, 6.months, 2024-01-01 (default: 90d)")
     hs.add_argument("--top", type=int, default=10, help="Number of files to return (default: 10)")
