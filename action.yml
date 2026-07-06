@@ -1,0 +1,94 @@
+name: Codeward PR report
+description: Generate a Codeward semantic PR report and optionally post it as a sticky pull request comment.
+
+inputs:
+  base:
+    description: Base ref to diff against. Leave empty to use the pull request base ref, then the repository default branch.
+    default: ""
+    required: false
+  security:
+    description: Include Codeward security heuristics.
+    default: "true"
+    required: false
+  comment:
+    description: Post or update a sticky pull request comment.
+    default: "true"
+    required: false
+  python-version:
+    description: Python version used to run Codeward.
+    default: "3.12"
+    required: false
+  from-source:
+    description: Install Codeward from the checked-out repository instead of PyPI.
+    default: "false"
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Codeward
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        if [[ "${{ inputs.from-source }}" == "true" ]]; then
+          python -m pip install .
+        else
+          python -m pip install codeward
+        fi
+
+    - name: Fetch base ref
+      shell: bash
+      run: |
+        set -euo pipefail
+        BASE="${{ inputs.base }}"
+        if [[ -z "$BASE" ]]; then
+          BASE="${{ github.base_ref || github.event.repository.default_branch || 'main' }}"
+        fi
+        echo "CODEWARD_BASE=$BASE" >> "$GITHUB_ENV"
+        git fetch --no-tags --depth=1 origin "$BASE:refs/remotes/origin/$BASE" || git fetch --no-tags origin "$BASE"
+
+    - name: Generate report
+      shell: bash
+      run: |
+        set -euo pipefail
+        REPORT_FILE="$RUNNER_TEMP/codeward-pr-report.md"
+        SECURITY_ARGS=()
+        if [[ "${{ inputs.security }}" == "true" ]]; then
+          SECURITY_ARGS+=(--security)
+        fi
+        codeward pr-report --base "origin/$CODEWARD_BASE" "${SECURITY_ARGS[@]}" > "$REPORT_FILE"
+        cat "$REPORT_FILE" >> "$GITHUB_STEP_SUMMARY"
+        echo "CODEWARD_REPORT_FILE=$REPORT_FILE" >> "$GITHUB_ENV"
+
+    - name: Post sticky PR comment
+      if: ${{ github.event_name == 'pull_request' && inputs.comment == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ env.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${GH_TOKEN:-}" ]]; then
+          echo "GITHUB_TOKEN/GH_TOKEN is not set; skipping Codeward PR comment."
+          exit 0
+        fi
+        marker="<!-- codeward-pr-report -->"
+        issue_number="${{ github.event.pull_request.number }}"
+        comment_id="$(gh api "repos/${{ github.repository }}/issues/$issue_number/comments" --paginate --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -n 1 || true)"
+        body_json="$RUNNER_TEMP/codeward-pr-comment.json"
+        jq -n --rawfile body "$CODEWARD_REPORT_FILE" '{body: $body}' > "$body_json"
+        if [[ -n "$comment_id" ]]; then
+          gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$comment_id" --input "$body_json" >/dev/null
+        else
+          gh api -X POST "repos/${{ github.repository }}/issues/$issue_number/comments" --input "$body_json" >/dev/null
+        fi
+
+    - name: Skip PR comment outside pull requests
+      if: ${{ github.event_name != 'pull_request' || inputs.comment != 'true' }}
+      shell: bash
+      run: echo "Codeward PR comment skipped for this event or action input."
