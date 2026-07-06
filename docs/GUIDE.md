@@ -259,7 +259,18 @@ With both installed, Codeward's Bash hook is inserted *before* RTK's so the rewr
 
 Codeward never rewrites commands starting with `codeward`, `rtk`, `contextzip`, or `snip`.
 
-## 11. Troubleshooting
+## 11. LSP-backed precision
+
+`refs` and `symbol` can optionally ask a local language server to confirm references:
+
+```bash
+codeward refs UserService --lsp
+CODEWARD_LSP=1 codeward symbol UserService
+```
+
+Codeward auto-detects Pyright/BasedPyright/pylsp, typescript-language-server, gopls, and rust-analyzer. Use `--no-lsp` to force the index-only behavior, or set `CODEWARD_LSP_SERVER_<LANG>` to override the command.
+
+## 12. Troubleshooting
 
 ### Hook does nothing
 

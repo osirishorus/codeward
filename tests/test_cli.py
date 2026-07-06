@@ -12,13 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
 
-def run_cli(args, cwd):
+def run_cli(args, cwd, env=None):
     cmd = [sys.executable, "-m", "codeward.cli", *args]
     # HOME=cwd isolates each test's global history write (~/.codeward/...)
     # to its own tmp dir so tests don't pollute the developer's real ~/.codeward.
+    run_env = {"PYTHONPATH": str(SRC), "HOME": str(cwd)}
+    if env:
+        run_env.update(env)
     return subprocess.run(
         cmd, cwd=cwd, text=True, capture_output=True,
-        env={"PYTHONPATH": str(SRC), "HOME": str(cwd)},
+        env=run_env,
     )
 
 
@@ -1405,6 +1408,57 @@ def test_refs_lists_callsites_excluding_definition(sample_repo):
     for r in j["references"]:
         assert (r["file"], r["line"]) not in def_files
         assert {"analyzer", "precision", "confidence"} <= set(r)
+
+
+def test_refs_lsp_upgrades_and_adds_exact_refs(sample_repo):
+    (sample_repo / "notes.txt").write_text("UserService appears in generated docs\n")
+    fixture = sample_repo / "lsp_fixture.json"
+    fixture.write_text(json.dumps({
+        "references": [
+            {"uri": (sample_repo / "src/controllers/user_controller.py").resolve().as_uri(), "range": {"start": {"line": 4, "character": 11}}},
+            {"uri": (sample_repo / "tests/test_user_service.py").resolve().as_uri(), "range": {"start": {"line": 4, "character": 11}}},
+            {"uri": (sample_repo / "notes.txt").resolve().as_uri(), "range": {"start": {"line": 0, "character": 0}}},
+        ]
+    }))
+    env = {
+        "CODEWARD_LSP_SERVER_PYTHON": f"{sys.executable} {ROOT / 'tests' / 'fake_lsp_server.py'} {fixture}",
+    }
+
+    payload = json.loads(run_cli(["refs", "--json", "--lsp", "UserService"], sample_repo, env=env).stdout)
+
+    assert payload["lsp"]["status"] == "ok"
+    assert payload["lsp"]["server"] == sys.executable
+    assert payload["lsp"]["confirmed"] >= 1
+    assert payload["lsp"]["added"] >= 1
+    exact = {(r["file"], r["line"], r["confidence"]) for r in payload["references"]}
+    assert ("src/controllers/user_controller.py", 5, "exact") in exact
+    assert ("notes.txt", 1, "exact") in exact
+
+
+def test_refs_lsp_unavailable_degrades_without_changing_results(sample_repo):
+    base = json.loads(run_cli(["refs", "--json", "UserService"], sample_repo).stdout)
+    payload = json.loads(run_cli(
+        ["refs", "--json", "--lsp", "UserService"],
+        sample_repo,
+        env={"PATH": "", "CODEWARD_LSP_SERVER_PYTHON": ""},
+    ).stdout)
+
+    assert payload["lsp"]["status"] == "unavailable"
+    assert payload["total"] == base["total"]
+    assert payload["references"] == base["references"]
+
+
+def test_doctor_lists_detected_lsp_servers(sample_repo):
+    result = run_cli(
+        ["doctor"],
+        sample_repo,
+        env={"CODEWARD_LSP_SERVER_PYTHON": f"{sys.executable} {ROOT / 'tests' / 'fake_lsp_server.py'}"},
+    )
+
+    assert result.returncode == 0
+    assert "LSP servers:" in result.stdout
+    assert "python:" in result.stdout
+    assert str(ROOT / "tests" / "fake_lsp_server.py") in result.stdout
 
 
 def test_python_ast_refs_cover_methods_aliases_attributes_and_shadowing(sample_repo):

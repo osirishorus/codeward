@@ -748,7 +748,7 @@ def _dedupe_refs(refs: list[Reference]) -> list[Reference]:
 
 
 def _reference_sort_key(ref: Reference) -> tuple[int, str, int, int, str]:
-    rank = {"high": 0, "medium": 1, "low": 2}
+    rank = {"exact": 0, "high": 1, "medium": 2, "low": 3}
     return (rank.get(ref.confidence, 2), ref.file, ref.line, ref.column, ref.text)
 
 
