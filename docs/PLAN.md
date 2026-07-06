@@ -43,6 +43,8 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 - `codeward affected [--changed | <target>] [--depth N]` — transitive blast radius of a change + the minimal tests to run (CI test-selection)
 - `codeward why <fileA> <fileB>` — shortest import/dependency path between two files
 - `codeward dead [target]` — top-level symbols with zero external references (candidate dead code), confidence-gated
+- `codeward pr-report [--base <ref>] [--security]` — GitHub-flavored PR report combining symbol-level `sdiff`, review findings, affected files, and minimal tests
+- Composite GitHub Action — runs `pr-report`, writes the step summary, and optionally posts/updates a sticky PR comment
 
 ### Token-budget bundling
 - `codeward budget [target]` — token cost audit + cheaper command recommendations
@@ -62,11 +64,12 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 - `npx codeward` (npm wrapper bootstraps via pipx/pip)
 - Native hooks for Claude / Codex / Gemini; MCP for the rest
 
+### Watch mode
+- `codeward watch [--debounce-ms N] [--stats]` — debounced/coalesced reindex batches, mtime+size unchanged-file skips, and incremental tree-sitter reparses with a bounded parse cache
+
 ## Forward direction
 
 ### Likely next (no RTK overlap)
-- **GitHub Action wrapping `sdiff` + `review --security` + `diff-pack`** — symbol-aware PR comments.
-- **Incremental tree-sitter parses** in watch mode (currently full-file reanalyze on each event).
 - **LSP-backed precision** for languages where tree-sitter gives only syntax-aware confidence.
 
 ### Maybe

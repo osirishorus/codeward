@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Codeward PR report
-        uses: osiris-ai/codescope@main
+        uses: osirishorus/codeward@main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -31,3 +31,5 @@ jobs:
           comment: "true"
           python-version: "3.12"
 ```
+
+Inputs: `base` (default: `""`; uses the pull request base, then repository default branch), `security` (default: `"true"`), `comment` (default: `"true"`), `python-version` (default: `"3.12"`), `from-source` (default: `"false"`).
