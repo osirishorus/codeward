@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - **`codeward pr-report [--base <ref>] [--security]`** — GitHub-flavored Markdown PR report combining symbol-level `sdiff`, review findings, affected files, minimal tests, and a sticky-comment marker; ships with a composite GitHub Action and dogfood workflow.
+- **LSP-backed precision for `refs` and `symbol`** — opt in with `--lsp` or `CODEWARD_LSP=1`. Auto-detects Pyright/BasedPyright/pylsp, typescript-language-server, gopls, and rust-analyzer; confirmed references are promoted to `confidence: "exact"` and LSP-only locations are appended.
+- **`codeward doctor` LSP inventory** — reports detected language servers per supported LSP language.
 
 ### Changed
 

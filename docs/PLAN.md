@@ -58,6 +58,7 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 ### Language coverage
 - 17 languages: Python (AST), Go, Rust, TS/JS, Java, Ruby, PHP, C#, C, C++, Kotlin, Swift, Scala, Bash, Lua, Elixir (tree-sitter)
 - Each grammar loads lazily — missing wheels degrade only that language
+- LSP-backed precision for `refs` and `symbol` is opt-in for Python, TypeScript/JavaScript, Go, and Rust
 
 ### Distribution
 - `pipx install codeward` / `pip install codeward` (PyPI)
@@ -70,7 +71,7 @@ Codeward is the **semantic-query layer** for coding agents. It composes with [RT
 ## Forward direction
 
 ### Likely next (no RTK overlap)
-- **LSP-backed precision** for languages where tree-sitter gives only syntax-aware confidence.
+- Editor/CI polish around existing semantic commands.
 
 ### Maybe
 - VS Code extension (heavier; defer until terminal CLI is rock-solid).

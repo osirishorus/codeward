@@ -15,7 +15,17 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 
 from .hooks import compact_test_output, estimate_tokens, gain, hook_response, record
-from .index import RepoIndex, extract_security_findings, extract_side_effects, is_test_file
+from .index import Reference, RepoIndex, _dedupe_refs, _reference_sort_key, extract_security_findings, extract_side_effects, is_test_file
+from .lsp import (
+    INSTALL_HINTS,
+    LspSession,
+    LspUnavailable,
+    detect_servers,
+    lsp_character_to_column,
+    normalize_language,
+    position_for_symbol,
+    uri_to_path,
+)
 
 
 def codeward_version() -> str:
@@ -42,11 +52,129 @@ def fmt_list(title: str, items: list[str], empty: str = "none") -> list[str]:
 
 
 def precision_label(analyzer: str, precision: str, confidence: str) -> str:
+    if confidence == "exact":
+        return "lsp/exact" if analyzer == "lsp" else f"{analyzer}/exact"
     if analyzer == "python_ast" and confidence == "high":
         return "python_ast/high"
     if precision == "heuristic" or confidence == "low":
         return "heuristic/low"
     return f"{precision}/{confidence}"
+
+
+def _lsp_enabled(args) -> bool:
+    explicit = getattr(args, "lsp", None)
+    if explicit is not None:
+        return bool(explicit)
+    return os.environ.get("CODEWARD_LSP") == "1"
+
+
+def _lsp_unavailable(language: str, reason: str | None = None) -> dict:
+    lang = normalize_language(language)
+    hint = INSTALL_HINTS.get(lang, "install a language server")
+    return {"status": "unavailable", "reason": reason or f"no server for {lang} ({hint})"}
+
+
+def _location_line_col(idx: RepoIndex, loc: dict) -> tuple[str, int, int] | None:
+    uri = loc.get("uri") or (loc.get("targetUri") if isinstance(loc, dict) else None)
+    range_obj = loc.get("range") or loc.get("targetSelectionRange") or loc.get("targetRange")
+    if not uri or not isinstance(range_obj, dict):
+        return None
+    start = range_obj.get("start")
+    if not isinstance(start, dict):
+        return None
+    try:
+        path = uri_to_path(str(uri)).resolve()
+        rel = path.relative_to(idx.root.resolve()).as_posix()
+        line = int(start.get("line", 0)) + 1
+        lsp_char = int(start.get("character", 0))
+    except (OSError, ValueError, TypeError, LspUnavailable):
+        return None
+    try:
+        text = idx.text(rel)
+    except KeyError:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+    lines = text.splitlines()
+    source_line = lines[line - 1] if 1 <= line <= len(lines) else ""
+    return rel, line, lsp_character_to_column(source_line, lsp_char)
+
+
+def _column_hits_token(line_text: str, column: int, token: str) -> bool:
+    if not token:
+        return False
+    start = 0
+    while True:
+        idx = line_text.find(token, start)
+        if idx < 0:
+            return False
+        if idx <= column <= idx + len(token):
+            return True
+        start = idx + len(token)
+
+
+def _source_line(idx: RepoIndex, rel: str, line: int) -> str:
+    try:
+        return idx.text(rel).splitlines()[line - 1]
+    except (KeyError, IndexError):
+        try:
+            return (idx.root / rel).read_text(encoding="utf-8", errors="replace").splitlines()[line - 1]
+        except (OSError, IndexError):
+            return ""
+
+
+def _merge_lsp_refs(idx: RepoIndex, name: str, syms, refs: list[Reference]) -> tuple[list[Reference], dict]:
+    if not syms:
+        return refs, _lsp_unavailable("", "no indexed definition for symbol")
+    sym = syms[0]
+    language = idx.files.get(sym.file).lang if sym.file in idx.files else Path(sym.file).suffix.lstrip(".")
+    lang_key = normalize_language(language)
+    server = (detect_servers().get(lang_key) or [None])[0]
+    if not server:
+        return refs, _lsp_unavailable(lang_key)
+    try:
+        file_path = idx.root / sym.file
+        line, char = position_for_symbol(file_path, sym.line, name)
+        with LspSession(idx.root, lang_key, file_path, server) as session:
+            session.definition(line, char)
+            locations = session.references(line, char)
+    except LspUnavailable as e:
+        return refs, _lsp_unavailable(lang_key, str(e))
+
+    bare = name.rsplit(".", 1)[-1]
+    lsp_locations = [loc for loc in (_location_line_col(idx, loc) for loc in locations) if loc is not None]
+    matched_lsp: set[int] = set()
+    confirmed = 0
+    merged: list[Reference] = []
+    for ref in refs:
+        upgraded = False
+        for i, (rel, line, col) in enumerate(lsp_locations):
+            if rel != ref.file or line != ref.line:
+                continue
+            if _column_hits_token(_source_line(idx, rel, line), col, bare):
+                upgraded = True
+                matched_lsp.add(i)
+                break
+        if upgraded and ref.confidence != "exact":
+            confirmed += 1
+            merged.append(Reference(ref.file, ref.line, ref.text, ref.analyzer, ref.precision, "exact", ref.kind, ref.column))
+        else:
+            merged.append(ref)
+
+    added = 0
+    for i, (rel, line, col) in enumerate(lsp_locations):
+        if i in matched_lsp:
+            continue
+        source_text = _source_line(idx, rel, line)
+        if not _column_hits_token(source_text, col, bare):
+            continue
+        text = source_text.strip()
+        merged.append(Reference(rel, line, text, "lsp", "semantic", "exact", "reference", col))
+        added += 1
+
+    merged = sorted(_dedupe_refs(merged), key=_reference_sort_key)
+    return merged, {"status": "ok", "server": server[0], "confirmed": confirmed, "added": added}
 
 
 def emit_tracked(lines: list[str], command_name: str, raw_token_estimate: int | None = None, *, payload: dict | None = None, json_mode: bool = False) -> None:
@@ -578,6 +706,9 @@ def cmd_refs(args) -> int:
     syms = idx.find_symbol(name)
     bare = name.rsplit(".", 1)[-1]
     refs = idx.references_to(bare)
+    lsp_status = None
+    if _lsp_enabled(args):
+        refs, lsp_status = _merge_lsp_refs(idx, name, syms, refs)
     # Filter strategy: tree-sitter and python_ast references are already
     # syntax-aware — they exclude the definition node at parse time, so
     # anything surviving is a genuine call/usage site even when it shares a
@@ -601,7 +732,13 @@ def cmd_refs(args) -> int:
         "definitions": [{"file": s.file, "line": s.line, "analyzer": s.analyzer, "precision": s.precision, "confidence": s.confidence} for s in syms],
         "references": rows, "total": len(rows),
     }
+    if lsp_status is not None:
+        payload["lsp"] = lsp_status
     out = ["# Codeward refs", f"Symbol: {name}  ({len(rows)} references, confidence-ranked)"]
+    if lsp_status and lsp_status.get("status") == "unavailable":
+        out.append(f"LSP: {lsp_status['reason']}")
+    elif lsp_status and lsp_status.get("status") == "ok":
+        out.append(f"LSP: {lsp_status['server']} confirmed {lsp_status['confirmed']}, added {lsp_status['added']}")
     if syms:
         out.append("Defined:")
         for s in syms:
@@ -904,10 +1041,13 @@ def cmd_symbol(args) -> int:
             for rel, line, text in hits[:20]:
                 print(f"- {rel}:{line}: {text}")
         return 2
+    lsp_status = None
     defs = []
     for s in syms:
         scope = set(idx.dependents_of_file(s.file)) | {s.file}
         callers = [r for r in idx.references_to(s.name, scope=scope) if r.file != s.file or s.kind != "class"]
+        if _lsp_enabled(args):
+            callers, lsp_status = _merge_lsp_refs(idx, s.name, [s], callers)
         defs.append({
             "name": s.name, "kind": s.kind, "file": s.file, "line": s.line, "end_line": s.end_line,
             "signature": s.signature or f"{s.kind} {s.name}",
@@ -917,7 +1057,13 @@ def cmd_symbol(args) -> int:
             "tests": idx.tests_for(s.file),
         })
     payload = {"command": "symbol", "name": args.name, "definitions": defs}
+    if lsp_status is not None:
+        payload["lsp"] = lsp_status
     out = ["# Codeward semantic summary", f"Symbol: {args.name}"]
+    if lsp_status and lsp_status.get("status") == "unavailable":
+        out.append(f"LSP: {lsp_status['reason']}")
+    elif lsp_status and lsp_status.get("status") == "ok":
+        out.append(f"LSP: {lsp_status['server']} confirmed {lsp_status['confirmed']}, added {lsp_status['added']}")
     for d in defs:
         out.append(f"Defined: {d['file']}:{d['line']}  {d['signature']}  [{precision_label(d['analyzer'], d['precision'], d['confidence'])}]")
         if d["methods"]:
@@ -1630,7 +1776,7 @@ def cmd_dead(args) -> int:
     else:
         matched = sorted(idx.files.keys())
 
-    conf_rank = {"low": 0, "medium": 1, "high": 2}
+    conf_rank = {"low": 0, "medium": 1, "high": 2, "exact": 3}
 
     def sym_conf(sym) -> str:
         if sym.analyzer == "python_ast":
@@ -2609,6 +2755,19 @@ def cmd_doctor(args) -> int:
     if rtk:
         lines.append("Tip: also check `rtk gain` for the cat/grep/find compression layer.")
 
+    lines.append("LSP servers:")
+    detected = detect_servers()
+    any_lsp = False
+    for language in ["python", "typescript", "javascript", "go", "rust"]:
+        commands = detected.get(language) or []
+        if commands:
+            any_lsp = True
+            lines.append(f"  {language}: {', '.join(' '.join(cmd) for cmd in commands)}")
+        else:
+            lines.append(f"  {language}: none detected")
+    if not any_lsp:
+        lines.append("  none detected")
+
     if issues:
         lines.append("\nIssues:")
         for i in issues:
@@ -3011,7 +3170,11 @@ def build_parser() -> argparse.ArgumentParser:
     td = sub.add_parser("todos", parents=[common], help="List TODO/FIXME/HACK/XXX/BUG comment markers")
     td.add_argument("target", nargs="?", help="Optional file or directory to limit the scan to")
     td.set_defaults(func=cmd_todos)
-    sy = sub.add_parser("symbol", parents=[common]); sy.add_argument("name"); sy.set_defaults(func=cmd_symbol)
+    sy = sub.add_parser("symbol", parents=[common]); sy.add_argument("name")
+    sy_lsp = sy.add_mutually_exclusive_group()
+    sy_lsp.add_argument("--lsp", dest="lsp", action="store_true", default=None, help="Use LSP-backed reference precision when a server is available")
+    sy_lsp.add_argument("--no-lsp", dest="lsp", action="store_false", help="Disable LSP even when CODEWARD_LSP=1")
+    sy.set_defaults(func=cmd_symbol)
     cg = sub.add_parser("callgraph", parents=[common]); cg.add_argument("query"); cg.set_defaults(func=cmd_callgraph)
     tf = sub.add_parser("tests-for", parents=[common]); tf.add_argument("target"); tf.set_defaults(func=cmd_tests_for)
     im = sub.add_parser("impact", parents=[common]); im.add_argument("target", nargs="?"); im.add_argument("--changed", action="store_true"); im.add_argument("--base"); im.set_defaults(func=cmd_impact)
@@ -3026,6 +3189,9 @@ def build_parser() -> argparse.ArgumentParser:
     sl.set_defaults(func=cmd_slice)
     rf = sub.add_parser("refs", parents=[common]); rf.add_argument("symbol")
     rf.add_argument("--include-defs", action="store_true", help="Also show the definition site(s)")
+    rf_lsp = rf.add_mutually_exclusive_group()
+    rf_lsp.add_argument("--lsp", dest="lsp", action="store_true", default=None, help="Use LSP-backed reference precision when a server is available")
+    rf_lsp.add_argument("--no-lsp", dest="lsp", action="store_false", help="Disable LSP even when CODEWARD_LSP=1")
     rf.set_defaults(func=cmd_refs)
     bl = sub.add_parser("blame", parents=[common]); bl.add_argument("symbol")
     bl.set_defaults(func=cmd_blame)
@@ -3094,7 +3260,7 @@ def build_parser() -> argparse.ArgumentParser:
     wy.set_defaults(func=cmd_why)
     dd = sub.add_parser("dead", parents=[common], help="Top-level symbols with no external references (candidate dead code)")
     dd.add_argument("target", nargs="?", help="Limit to a file or directory prefix (default: whole repo)")
-    dd.add_argument("--min-confidence", dest="min_confidence", choices=["low", "medium", "high"], default="medium",
+    dd.add_argument("--min-confidence", dest="min_confidence", choices=["low", "medium", "high", "exact"], default="medium",
                     help="Minimum analyzer confidence to report (default: medium; low includes regex guesses)")
     dd.add_argument("--include-public", action="store_true",
                     help="Also flag public (exported) symbols — skipped by default since external code may import them")

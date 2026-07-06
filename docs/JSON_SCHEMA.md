@@ -14,9 +14,9 @@ Backwards compatibility: fields will only ever be **added**. Existing keys won't
 - Lists are stable-ordered (file paths sorted lexicographically; symbols by line; matches by file then line).
 - Missing/empty values are explicit (`[]` or `null`), never omitted.
 - Analyzer metadata appears on files, symbols, references, and callgraph steps:
-  `analyzer` is `python_ast`, `tree_sitter`, or `regex`; `precision` is
-  `exact_range`, `syntax_aware`, or `heuristic`; `confidence` is `high`,
-  `medium`, or `low`.
+  `analyzer` is `python_ast`, `tree_sitter`, `regex`, or `lsp`; `precision`
+  is `exact_range`, `syntax_aware`, `semantic`, or `heuristic`; `confidence`
+  is `exact`, `high`, `medium`, or `low`.
 
 ## `codeward map --json`
 
@@ -134,11 +134,31 @@ Markers inside string literals are not reported by the intended contract.
       "callers": [{"file": "src/controllers/user_controller.py", "line": 4, "text": "...", "analyzer": "python_ast", "precision": "exact_range", "confidence": "high"}],
       "tests": ["tests/test_user_service.py"]
     }
-  ]
+  ],
+  "lsp": {"status": "ok", "server": "pyright-langserver", "confirmed": 1, "added": 0}
 }
 ```
 
+`lsp` is present only when `--lsp` or `CODEWARD_LSP=1` is enabled. If no server is available, it is `{"status": "unavailable", "reason": "..."}` and the rest of the payload keeps the index-only results.
+
 If the symbol is not found, `definitions` is `[]` and `text_matches` lists fallback grep hits.
+
+## `codeward refs --json <symbol>`
+
+```json
+{
+  "command": "refs",
+  "symbol": "UserService",
+  "definitions": [{"file": "src/services/user_service.py", "line": 5, "analyzer": "python_ast", "precision": "exact_range", "confidence": "high"}],
+  "references": [
+    {"file": "src/controllers/user_controller.py", "line": 4, "text": "...", "analyzer": "python_ast", "precision": "exact_range", "confidence": "exact", "kind": "name"}
+  ],
+  "total": 1,
+  "lsp": {"status": "ok", "server": "pyright-langserver", "confirmed": 1, "added": 0}
+}
+```
+
+The `lsp` block is append-only and appears only when LSP is requested. `confidence: "exact"` sorts above `high` and marks references confirmed or added by the language server.
 
 ## `codeward callgraph --json <route-or-symbol>`
 

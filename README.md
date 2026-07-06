@@ -185,9 +185,9 @@ All read-only commands support `--json`.
 | `codeward read <file>` | Symbols + signatures + dependents + tests + side effects (`--flow` adds method bodies) | `cat <file>` |
 | `codeward search [--regex] [-i] <query>` | Index-grouped search hits with optional regex / ignore-case matching | `grep -rn <query>` |
 | `codeward todos [target]` | TODO/FIXME/HACK/XXX/BUG comment markers grouped by file | `grep -rn TODO` |
-| `codeward symbol <name>` | Definition + ranked callers + tests | grep + sed |
+| `codeward symbol <name> [--lsp]` | Definition + ranked callers + tests | grep + sed |
 | `codeward slice <Class.method>` | **Exact bytes of one method** | `sed -n 'X,Yp'` |
-| `codeward refs <symbol>` | Ranked reference sites (file:line) | recursive grep |
+| `codeward refs <symbol> [--lsp]` | Ranked reference sites (file:line) | recursive grep |
 | `codeward tests-for <target>` | Likely covering tests | guessing |
 | `codeward impact [--changed\|<target>]` | Dependents + tests + risk | manual review |
 | `codeward preflight <file>` | "What to know before editing this" — see [above](#preflight-blast-radius-context-before-edits) | n/a |
@@ -205,6 +205,14 @@ All read-only commands support `--json`.
 ### Maturity varies by language
 
 Precision depends on the analyzer for the file. `--json` output annotates each row with `analyzer`/`precision`/`confidence`.
+
+### LSP-backed precision (opt-in)
+
+`codeward refs <symbol> --lsp` and `codeward symbol <name> --lsp` ask a local language server to confirm reference locations. You can enable it for all runs with `CODEWARD_LSP=1`, or force it off with `--no-lsp`.
+
+Detected servers: Pyright/BasedPyright/pylsp for Python, typescript-language-server for TypeScript/JavaScript, gopls for Go, and rust-analyzer for Rust. Override detection with `CODEWARD_LSP_SERVER_<LANG>`, for example `CODEWARD_LSP_SERVER_PYTHON="pyright-langserver --stdio"`.
+
+JSON output adds an append-only `lsp` block. References confirmed or supplied by LSP use `confidence: "exact"`; when no server is available, results fall back to the existing heuristic index.
 
 | Command | What it does | Best on |
 |---|---|---|

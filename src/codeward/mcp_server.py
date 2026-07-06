@@ -132,10 +132,10 @@ def create_server():
     # ---- Symbol-level ---------------------------------------------------
 
     @mcp.tool()
-    def codeward_symbol(name: str) -> dict:
+    def codeward_symbol(name: str, lsp: bool | None = None) -> dict:
         """Find a symbol: definitions + confidence-ranked callers + tests.
         Use to ask "where is X defined and who uses it?"."""
-        return _run(_cli.cmd_symbol, _ns(name=name))
+        return _run(_cli.cmd_symbol, _ns(name=name, lsp=lsp))
 
     @mcp.tool()
     def codeward_callgraph(query: str) -> dict:
@@ -155,10 +155,10 @@ def create_server():
         )
 
     @mcp.tool()
-    def codeward_refs(symbol: str, include_defs: bool = False) -> dict:
+    def codeward_refs(symbol: str, include_defs: bool = False, lsp: bool | None = None) -> dict:
         """Confidence-ranked reference sites for a symbol, separate from
         definitions. Replaces `grep -rn` with semantic awareness."""
-        return _run(_cli.cmd_refs, _ns(symbol=symbol, include_defs=include_defs))
+        return _run(_cli.cmd_refs, _ns(symbol=symbol, include_defs=include_defs, lsp=lsp))
 
     @mcp.tool()
     def codeward_blame(symbol: str) -> dict:
