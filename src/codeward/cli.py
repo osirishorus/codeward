@@ -153,7 +153,11 @@ def cmd_watch(args) -> int:
     watch keeps that refresh work off the command path on large repos.
     Different surface from RTK (RTK has no daemon); no clash."""
     from .watch import run_watch
-    return run_watch(Path.cwd(), debounce=getattr(args, "debounce", 0.5))
+    debounce = getattr(args, "debounce", None)
+    debounce_ms = getattr(args, "debounce_ms", None)
+    if debounce_ms is not None:
+        debounce = debounce_ms / 1000
+    return run_watch(Path.cwd(), debounce=debounce, stats=getattr(args, "stats", False))
 
 
 def cmd_preflight(args) -> int:
@@ -3038,7 +3042,9 @@ def build_parser() -> argparse.ArgumentParser:
     ro.add_argument("--include-tests", action="store_true", help="Include routes declared in test files/fixtures")
     ro.set_defaults(func=cmd_routes)
     wt = sub.add_parser("watch")
-    wt.add_argument("--debounce", type=float, default=0.5, help="Coalesce file events within this many seconds (default: 0.5)")
+    wt.add_argument("--debounce", type=float, default=0.2, help="Coalesce file events within this many seconds (default: 0.2)")
+    wt.add_argument("--debounce-ms", type=int, help="Coalesce file events within this many milliseconds")
+    wt.add_argument("--stats", action="store_true", help="Print batch reanalysis and parse-cache statistics")
     wt.set_defaults(func=cmd_watch)
     te = sub.add_parser("test"); te.add_argument("--force", action="store_true", help="Run even when RTK is installed"); te.add_argument("command", nargs=argparse.REMAINDER); te.set_defaults(func=cmd_test)
     ix = sub.add_parser("index"); ix.add_argument("--output"); ix.set_defaults(func=cmd_index)
